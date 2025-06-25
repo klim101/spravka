@@ -86,6 +86,18 @@ logging.basicConfig(level=logging.WARNING)
 import openai
 
 
+import html, re
+
+_URL_PAT = re.compile(r"https?://[^\s)]+")
+def _linkify(text: str) -> str:
+    """Заменяет http/https-URL на <a href="...">ссылка</a>."""
+    def repl(m):
+        u = html.escape(m.group(0))
+        return f'<a href="{u}" target="_blank">ссылка</a>'
+    return _URL_PAT.sub(repl, text)
+
+
+
 # ╭─🔧  вспомогалки ───────────────────────────────╮
 _BAD = ("vk.com", "facebook.", ".pdf", ".jpg", ".png")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Win64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
@@ -120,7 +132,7 @@ class RAG:
         return re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
     async def _summary(self, ctx):
         sys = ("Ты — аналитик рынков. Составь абзацы: описание, общая инф., партнёрства, "
-               "направления, история, цифры, продукты, география, сотрудники, уникальность, выводы. "
+               "направления, история, цифры, продукты, география, сотрудники, уникальность, выводы. После КАЖДОГО факта ставь ссылку-источник в круглых скобках (полный URL)  "
                "Без Markdown и без упоминаний выручки.")
         return await _gpt([{"role": "system", "content": sys},
                            {"role": "user",   "content": ctx}], T=0.25)
@@ -216,7 +228,7 @@ class FastMarketRAG:
             f"Ты — аналитик по рынку «{self.market}» ({self.country}). "
             "Для каждого года напиши абзац: объём, рост, сегменты, регионы, "
             "игроки/доли, сделки, ценовые срезы, тренды, барьеры, вывод. "
-            "Уникальные факты, без повторов, источники в скобках.")
+            "Уникальные факты, без повторов,  После КАЖДОГО факта ставь ссылку-источник в круглых скобках (полный URL) . ")
         summary = await gpt_async([
             {"role": "system", "content": sys},
             {"role": "user",   "content": context}
@@ -457,10 +469,10 @@ if st.button("🔍 Получить данные"):
             # --- GPT паспорт ---
             st.subheader("📝 GPT-паспорт")
             res = get_rag(name)
+            passport_html = _linkify(res['summary']).replace(chr(10), '<br>')
             st.markdown(
                 f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                f"border-radius:8px;padding:18px;line-height:1.55'>"
-                f"{res['summary'].replace(chr(10),'<br>')}</div>",
+                f"border-radius:8px;padding:18px;line-height:1.55'>{passport_html}</div>",
                 unsafe_allow_html=True)
     
             with st.expander("⚙️ Запросы"):
@@ -482,10 +494,10 @@ if st.button("🔍 Получить данные"):
                 with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                     mkt_res = get_market_rag(mkt)
             
+                market_html = _linkify(mkt_res['summary']).replace(chr(10), '<br>')
                 st.markdown(
                     f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                    f"border-radius:8px;padding:18px;line-height:1.55'>"
-                    f"{mkt_res['summary'].replace(chr(10), '<br>')}</div>",
+                    f"border-radius:8px;padding:18px;line-height:1.55'>{market_html}</div>",
                     unsafe_allow_html=True)
             
                 with st.expander("⚙️ Запросы к Google"):
