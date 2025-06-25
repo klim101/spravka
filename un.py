@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[4]:
+# In[5]:
 
 
 # Устанавливаем API-ключ OpenAI
@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 import openai
 from typing import List, Dict, Any, Tuple
 import json
-
+import streamlit as st
 
 
 KEYS = {
