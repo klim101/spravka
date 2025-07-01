@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[5]:
+# In[6]:
 
 
 # Устанавливаем API-ключ OpenAI
@@ -29,48 +29,7 @@ KEYS = {
 # In[2]:
 
 
-def make_full_word_report(company, inn, market, passport, finances_df, fig, market_report):
-    doc = Document()
-    doc.add_heading(f"Отчёт по компании: {company}", 0)
-    doc.add_paragraph(f"ИНН: {inn}")
-    if market:
-        doc.add_paragraph(f"Рынок: {market}")
 
-    doc.add_heading("Паспорт компании", level=1)
-    for para in passport.split("\n"):
-        if para.strip():
-            doc.add_paragraph(para.strip())
-
-    doc.add_heading("Финансовый профиль", level=1)
-    # Таблица финансов (finances_df — DataFrame)
-    table = doc.add_table(rows=1, cols=len(finances_df.columns)+1)
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = "Метрика"
-    for i, col in enumerate(finances_df.columns):
-        hdr_cells[i+1].text = str(col)
-    for idx, row in finances_df.iterrows():
-        row_cells = table.add_row().cells
-        row_cells[0].text = str(idx)
-        for j, val in enumerate(row):
-            row_cells[j+1].text = str(val)
-    doc.add_paragraph("")
-
-    # График (fig — matplotlib Figure)
-    img_stream = BytesIO()
-    fig.savefig(img_stream, format='png', bbox_inches='tight')
-    img_stream.seek(0)
-    doc.add_picture(img_stream, width=Inches(5.5))
-    doc.add_paragraph("")
-
-    doc.add_heading("GPT-анализ рынка", level=1)
-    for para in market_report.split("\n"):
-        if para.strip():
-            doc.add_paragraph(para.strip())
-
-    output = BytesIO()
-    doc.save(output)
-    output.seek(0)
-    return output
 
 
 # In[ ]:
@@ -83,18 +42,54 @@ import pandas as pd, numpy as np, matplotlib.pyplot as plt
 
 nest_asyncio.apply()
 logging.basicConfig(level=logging.WARNING)
-import openai
+import os, re, html, textwrap, asyncio, logging, nest_asyncio
+import aiohttp, requests, streamlit as st
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+import tldextract, trafilatura, openai
 
 
 import html, re
 
-_URL_PAT = re.compile(r"https?://[^\s)]+")
-def _linkify(text: str) -> str:
-    """Заменяет http/https-URL на <a href="...">ссылка</a>."""
+_URL_PAT = re.compile(r"https?://[^\s)]+", flags=re.I)
+
+def _linkify(text) -> str:
+    """Безопасно превращает URL в <a …>ссылка</a>."""
+    if not isinstance(text, str):                      # << главное
+        text = "" if text is None else str(text)
+
     def repl(m):
         u = html.escape(m.group(0))
         return f'<a href="{u}" target="_blank">ссылка</a>'
     return _URL_PAT.sub(repl, text)
+
+
+
+
+
+
+
+# ── helpers ────────────────────────────────────────────────
+async def _site_snippet(domain: str) -> str:
+    """Возвращает первый Google-сниппет для site:domain (или '')."""
+    if not domain:
+        return ""
+    async with aiohttp.ClientSession() as sess:
+        q = f"site:{domain}"
+        snips = await _google(sess, q, n=1)
+    return snips[0][1] if snips else ""
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -121,48 +116,121 @@ async def _gpt(msgs, T=0.2, model="gpt-4o-mini"):
         model=model, temperature=T, messages=msgs)
     return chat.choices[0].message.content.strip()
 
+
+
+
+
 class RAG:
-    def __init__(self, company, country="Россия", steps=2, snips=3):
-        self.company, self.country, self.steps, self.snips = company, country, steps, snips
-    async def _queries(self, hist=""):
-        sys  = "Ты — исследователь. Придумай 5–10 Google-запросов…"
-        ask  = f"Нужно описание {self.company} ({self.country}). Формат: QUERY: <...>"
-        raw  = await _gpt([{"role": "system", "content": sys},
-                           {"role": "user",   "content": ask + hist}], T=0.1)
+    """
+    summary   – итоговый отчёт (plain-text)
+    queries   – список Гугл-запросов (уже с добавленным рынком)
+    snippets  – Google-сниппеты, которые отданы GPT
+    site_ctx  – контекст сайта («site:…» + “рынок компании – …”)
+    """
+    def __init__(self, company: str, website: str = "", market: str = "",
+                 years=(2022, 2023, 2024), country: str = "Россия",
+                 steps: int = 2, snips: int = 3):
+        self.company  = company.strip()
+        self.website  = website.strip()
+        self.market   = market.strip()       # ← индустрия
+        self.country  = country
+        self.years    = years
+        self.steps    = steps
+        self.snips    = snips
+
+    # ----------  контекст сайта -----------------------------------
+    async def _site_ctx(self) -> str:
+        dom = tldextract.extract(self.website).registered_domain if self.website else ""
+        snip = await _site_snippet(dom)
+        if snip:
+            return f"{snip}\nрынок компании – {self.market}" if self.market else snip
+        return f"рынок компании – {self.market}" if self.market else ""
+
+    # ----------  GPT → 10-12 поисковых запросов -------------------
+    async def _queries(self, hist="") -> list[str]:
+        dom  = tldextract.extract(self.website).registered_domain if self.website else ""
+        base = f'"{self.company}"'
+        if dom:
+            base += f' OR site:{dom}'
+
+        sys = (
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 10–12 ТОЧНЫХ GOOGLE-ЗАПРОСОВ, "
+            f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
+            f"({self.country}, {', '.join(map(str, self.years))}). "
+            "ФОРМАТ: QUERY: <строка запроса>. БЕЗ ДОПОЛНИТЕЛЬНЫХ КОММЕНТАРИЕВ."
+        )
+        usr = f"base={base}" + hist
+        raw = await _gpt(
+            [{"role": "system", "content": sys},
+             {"role": "user",   "content": usr}],
+            T=0.10
+        )
         return re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
-    async def _summary(self, ctx):
-        sys = ("Ты — аналитик рынков. Составь абзацы: описание, общая инф., партнёрства, "
-               "направления, история, цифры, продукты, география, сотрудники, уникальность, выводы. После КАЖДОГО факта ставь ссылку-источник в круглых скобках (полный URL)  "
-               "Без Markdown и без упоминаний выручки.")
-        return await _gpt([{"role": "system", "content": sys},
-                           {"role": "user",   "content": ctx}], T=0.25)
+
+    # ----------  формируем GPT-конспект ---------------------------
+    async def _summary(self, ctx: str, site_ctx: str = "") -> str:
+        sys = (
+            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ В ФОРМЕ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ ПО СЛЕДУЮЩИМ ТЕМАТИЧЕСКИМ БЛОКАМ: "
+            "1) ОПИСАНИЕ (миссия, род деятельности, сфера), "
+            "2) ОБЩАЯ ИНФОРМАЦИЯ (юридический статус, дата и место основания, штаб-квартира), "
+            "3) ПАРТНЁРСТВА (ключевые альянсы и сотрудничества), "
+            "4) НАПРАВЛЕНИЯ (ключевые линии бизнеса и инициативы), "
+            "5) ИСТОРИЯ (вехи развития, ключевые события), "
+            "6) ЦИФРЫ (объёмы производства, доля рынка, активы и др. — КРОМЕ ВЫРУЧКИ), "
+            "7) ПРОДУКТЫ (основные категории товаров и услуг), "
+            "8) ГЕОГРАФИЯ (рынки присутствия, регионы продаж, производственные мощности), "
+            "9) СОТРУДНИКИ (численность персонала, ключевые фигуры, корпоративная культура), "
+            "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
+            "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
+            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
+            "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ."
+        )  
+        if site_ctx:
+            ctx = f"SITE_CONTEXT:\n{site_ctx}\n\n{ctx}"
+        return await _gpt(
+            [{"role": "system", "content": sys},
+             {"role": "user",   "content": ctx}],
+            T=0.25
+        )
+
+    # ----------  основной пайплайн -------------------------------
     async def _run_async(self):
+        site_ctx = await self._site_ctx()
         queries, snippets, hist = [], [], ""
+
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
-                ql = await self._queries(hist);  queries += ql
-                for res in await asyncio.gather(*[_google(s, q, self.snips) for q in ql]):
-                    snippets += res
+                q_raw = await self._queries(hist)        # GPT-запросы
+                # ▸ добавляем к КАЖДОМУ запросу рынок (если он указан)
+                ql = [f"{q} {self.market}" if self.market and self.market.lower() not in q.lower()
+                      else q for q in q_raw]
+
+                queries  += ql
+                res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
+                snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
-        ctx = "\n".join(f"URL: {u}\nTXT: {t}" for u, t in snippets)[:20_000]
-        return {"summary": await self._summary(ctx), "queries": queries, "snippets": snippets}
+
+        ctx  = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snippets)[:20_000]
+        summ = await self._summary(ctx, site_ctx)
+        return {"summary":  summ,
+                "queries":  queries,
+                "snippets": snippets,
+                "site_ctx": site_ctx}
+
     def run(self):
-        return asyncio.get_event_loop().run_until_complete(self._run_async())
+        return asyncio.run(self._run_async())
 
-@st.cache_data(ttl=86_400)
-def get_rag(name): return RAG(name).run()
 
-@st.cache_data(ttl=3_600)
-def ck_company(inn):
-    r = requests.get("https://api.checko.ru/v2/company",
-                     params={"key": KEYS["CHECKO_API_KEY"], "inn": inn}, timeout=10)
-    r.raise_for_status(); return r.json()["data"]
 
-@st.cache_data(ttl=3_600)
-def ck_fin(inn):
-    r = requests.get("https://api.checko.ru/v2/finances",
-                     params={"key": KEYS["CHECKO_API_KEY"], "inn": inn}, timeout=10)
-    r.raise_for_status(); return r.json()["data"]
+
+
+
+
+
+
+
+
+
 
 
 
@@ -204,10 +272,21 @@ class FastMarketRAG:
     
     async def _queries(self, hist=""):
         sys = (
-            "Ты — исследователь рынков. Сформулируй 7-12 Google-запросов, "
-            f"чтобы найти объём, структуру, сегменты, динамику, игроков и тренды "
-            f"рынка «{self.market}» ({self.country}) за {', '.join(map(str, self.years))}. "
-            "Формат: QUERY: <строка запроса>")
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 10–12 ТОЧНЫХ И ЭФФЕКТИВНЫХ GOOGLE-ЗАПРОСОВ, "
+            f"НАПРАВЛЕННЫХ НА СБОР СТРУКТУРИРОВАННОЙ ИНФОРМАЦИИ О РЫНКЕ «{self.market}» В СТРАНЕ {self.country.upper()} ЗА ПЕРИОД {', '.join(map(str, self.years))}. "
+            "ПОИСКОВЫЕ ЗАПРОСЫ ДОЛЖНЫ ОХВАТЫВАТЬ СЛЕДУЮЩИЕ АСПЕКТЫ РЫНКА: "
+            "1) ОБЪЁМ И ДИНАМИКА РЫНКА, "
+            "2) СТРУКТУРА И СЕГМЕНТАЦИЯ, "
+            "3) ОСНОВНЫЕ ИГРОКИ И ИХ ДОЛИ, "
+            "4) ЦЕНЫ И ЦЕНОВЫЕ ТЕНДЕНЦИИ, "
+            "5) КЛЮЧЕВЫЕ ТРЕНДЫ И ИНОВАЦИИ, "
+            "6) РЕГИОНАЛЬНЫЙ РАЗРЕЗ, "
+            "7) ФАКТОРЫ РОСТА И БАРЬЕРЫ ВХОДА, "
+            "8) СДЕЛКИ, IPO, СЛИЯНИЯ, "
+            "9) АНАЛИТИЧЕСКИЕ ОТЧЁТЫ И ДОКЛАДЫ "
+            "ФОРМАТ ОТВЕТА: QUERY: <СТРОКА ДЛЯ ПОИСКА В GOOGLE>. "
+            "НЕ ПОВТОРЯЙ ЗАПРОСЫ. НЕ ДОБАВЛЯЙ ЛИШНИХ ПРЕДИСЛОВИЙ — ТОЛЬКО СПИСКОМ."
+        )
         raw = await gpt_async([
             {"role": "system", "content": sys},
             {"role": "user",   "content": hist}
@@ -225,10 +304,21 @@ class FastMarketRAG:
 
         context = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snippets)[:18000]
         sys = (
-            f"Ты — аналитик по рынку «{self.market}» ({self.country}). "
-            "Для каждого года напиши абзац: объём, рост, сегменты, регионы, "
-            "игроки/доли, сделки, ценовые срезы, тренды, барьеры, вывод. "
-            "Уникальные факты, без повторов,  После КАЖДОГО факта ставь ссылку-источник в круглых скобках (полный URL) . ")
+            f"ТЫ — ВЫСОКОКЛАССНЫЙ АНАЛИТИК РЫНКА «{self.market}» В СТРАНЕ {self.country.upper()}. "
+            "СФОРМИРУЙ ПОГОДОВОЙ ОБЗОР РЫНКА, ГДЕ КАЖДЫЙ ГОД ПРЕДСТАВЛЕН ОТДЕЛЬНЫМ НАПОЛНЕННЫМ АБЗАЦЕМ, ВКЛЮЧАЮЩИМ СЛЕДУЮЩИЕ ЭЛЕМЕНТЫ: "
+            "1) ОБЪЁМ РЫНКА (единицы измерения и оценка), "
+            "2) ТЕМП РОСТА (в процентах или абсолютных значениях), "
+            "3) СТРУКТУРА И СЕГМЕНТАЦИЯ (по типу продукта, клиенту, каналу и др.), "
+            "4) РЕГИОНАЛЬНЫЕ РАЗРЕЗЫ (ключевые регионы внутри страны), "
+            "5) ОСНОВНЫЕ ИГРОКИ И ИХ ДОЛИ (с долями в %, если доступны), "
+            "6) КРУПНЫЕ СДЕЛКИ И СОБЫТИЯ (M&A, IPO, партнерства), "
+            "7) ЦЕНОВОЙ АНАЛИЗ (уровни цен, динамика, факторы влияния), "
+            "8) КЛЮЧЕВЫЕ ТРЕНДЫ (технологии, спрос, регулирование и др.), "
+            "9) БАРЬЕРЫ И ОГРАНИЧЕНИЯ (вход, логистика, нормативка), "
+            "10) ВЫВОДЫ ПО ГОДУ (ключевые итоги и сдвиги). "
+            "ВСЕ ФАКТЫ ДОЛЖНЫ БЫТЬ УНИКАЛЬНЫМИ, НЕ ПОВТОРЯТЬСЯ И ПОДТВЕРЖДЁННЫ РЕАЛЬНЫМИ ССЫЛКАМИ НА ИСТОЧНИКИ В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
+            "НЕ ИСПОЛЬЗУЙ MARKDOWN, НЕ ПРИДУМЫВАЙ ФАКТЫ — ТОЛЬКО ДОКУМЕНТИРОВАННЫЕ ДАННЫЕ."
+        )
         summary = await gpt_async([
             {"role": "system", "content": sys},
             {"role": "user",   "content": context}
@@ -248,110 +338,165 @@ def get_market_rag(market):
 
 
 
+# ╭─🌐  Leaders & Interviews (context-aware)  ───────────────────────╮
+import aiohttp, asyncio, re, html, logging, openai, streamlit as st, tldextract
 
-# ╭─🌐  Leaders & Interviews (super-fast) ─────────────────────╮
-import aiohttp, asyncio, re, html, logging, openai, streamlit as st
-
-HEADERS = {"User-Agent": "Mozilla/5.0"}           # короткий UA
-
-# ── helper: превращаем URL в кликабельную ссылку ------------
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 _URL_PAT = re.compile(r"https?://[^\s)]+")
-def _linkify(text: str) -> str:
-    def repl(m):
-        u = html.escape(m.group(0))
-        return f'<a href="{u}" target="_blank">ссылка</a>'
-    return _URL_PAT.sub(repl, text)
+def _linkify(txt:str)->str:
+    return _URL_PAT.sub(lambda m:f'<a href="{html.escape(m.group(0))}" target="_blank">ссылка</a>', txt)
 
-# ── один запрос к Google CSE (только сниппеты) --------------
-async def _snip(sess: aiohttp.ClientSession, query: str, n: int = 4):
+# --- быстрый сниппет Google ---------------------------------------
+async def _snip(sess: aiohttp.ClientSession, query:str, n:int=4):
     q = re.sub(r'[\"\'“”]', '', query)[:90]
-    params = {
-        "key": KEYS["GOOGLE_API_KEY"],
-        "cx":  KEYS["GOOGLE_CX"],
-        "q":   q, "num": n, "hl": "ru", "gl": "ru"
-    }
+    params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
+              "q": q, "num": n, "hl": "ru", "gl": "ru"}
     try:
         async with sess.get("https://www.googleapis.com/customsearch/v1",
-                            params=params, headers=HEADERS, timeout=8) as r:
-            if r.status != 200:
-                logging.warning(f"[Google] {r.status}")
-                return []
+                             params=params, headers=HEADERS, timeout=8) as r:
+            if r.status!=200:
+                logging.warning(f"[Google] {r.status}"); return []
             js = await r.json()
-            return [(it["link"], it.get("snippet", ""))
-                    for it in js.get("items", []) if not _bad(it["link"])]
+            return [(it["link"], it.get("snippet",""))
+                    for it in js.get("items",[]) if not _bad(it["link"])]
     except asyncio.TimeoutError:
-        logging.warning("[Google] timeout")
-        return []
+        logging.warning("[Google] timeout"); return []
 
-# ── основной класс ------------------------------------------
+# --- контекст-сниппет по домену -----------------------------------
+async def _site_snip(sess, domain:str)->str:
+    if not domain: return ""
+    res = await _snip(sess, f"site:{domain}", n=1)
+    return res[0][1] if res else ""
+
+# ── основной класс -------------------------------------------------
 class FastLeadersInterviews:
-    """⚡️ Выдаёт dict(summary, names, queries, snippets) за ~10-15 с."""
-    def __init__(self, company: str, country: str = "Россия"):
-        self.c, self.cntry = company, country
+    """
+    summary  – HTML-блок (руководители + дайджест интервью)
+    names    – список «ФИО (роль)»
+    queries  – все поисковые запросы
+    snippets – сниппеты, отданные GPT
+    """
+    def __init__(self, company:str, website:str="", market:str="", country:str="Россия"):
+        self.c, self.site, self.market, self.cntry = company, website.strip(), market.strip(), country
 
-    # ---------- 1. ФИО --------------------------------------
+    # ---- домен сайта ----------------------------------------------
+    def _domain(self):
+        return tldextract.extract(self.site).registered_domain if self.site else ""
+
+    # ---- 1. руководители ------------------------------------------
     async def _get_names(self, sess):
-        roles = ["генеральный директор", "CEO", "учредитель",
-                 "собственник", "владельцы", "основатель", "директор"]
-        tasks = [_snip(sess, f"{self.c} {self.cntry} {r}", 4) for r in roles]
-        snippets = sum(await asyncio.gather(*tasks), [])
-        if not snippets:
+        roles = ["генеральный директор","CEO","учредитель",
+                 "собственник","владельцы","основатель","директор"]
+        dom  = self._domain()
+        site_ctx = await _site_snip(sess, dom)
+
+        tasks=[]
+        for r in roles:
+            q = f'"{self.c}" {r}'
+            if dom: q += f' OR site:{dom}'
+            tasks.append(_snip(sess, q, 4))
+        snips = sum(await asyncio.gather(*tasks), [])
+
+        ctx = ""
+        if site_ctx:
+            ctx += f"SITE_CONTEXT:\n{site_ctx}\nрынок компании – {self.market}\n\n"
+        ctx += "\n".join(f"URL:{u}\nTXT:{t}" for u,t in snips)[:10_000]
+
+        if not snips:
             return []
-        ctx = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snippets)[:10_000]
-        sys = ("Выдели всех руководителей/владельцев компании: "
-               "верни список «ФИО (роль)» без лишнего.")
-        txt = await gpt_async([{"role": "system", "content": sys},
-                               {"role": "user",   "content": ctx}], T=0.12)
+
+        sys = ("ТЫ — ПРОФЕССИОНАЛЬНЫЙ АНАЛИТИК КОМПАНИЙ. НАЙДИ И ВЕРНИ ТОЧНЫЙ СПИСОК "
+               "РУКОВОДИТЕЛЕЙ/ВЛАДЕЛЬЦЕВ ИМЕННО ЭТОЙ КОМПАНИИ, "
+               "ИГНОРИРУЯ ОДНОФАМИЛЬЦЕВ И НЕСВЯЗАННЫЕ УПОМИНАНИЯ. "
+               "ФОРМАТ: «ФИО (роль)» на каждую строку, без лишнего.")
+        txt = await gpt_async([{"role":"system","content":sys},
+                               {"role":"user",  "content":ctx}], T=0.12)
         return [ln.strip() for ln in txt.splitlines() if ln.strip()]
 
-    # ---------- 2. Интервью ---------------------------------
+    # ---- 2. интервью ----------------------------------------------
     async def _get_interviews(self, sess, names):
+        dom = self._domain()
         if not names:
             return [], [], "Свежих интервью не найдено."
+    
         all_snips, queries = [], []
         for fio in names:
             fio_cut = fio.split("(")[0].strip()
-            q_tpl = ["интервью", "интервью 2024", "интервью 2023",
-                     "комментарий", "exclusive interview", "цитата"]
-            queries += [f"{fio_cut} {self.c} {q}" for q in q_tpl]
-            tasks = [_snip(sess, f"{fio_cut} {self.c} {q}", 3) for q in q_tpl]
-            all_snips += sum(await asyncio.gather(*tasks), [])
+            q_tpl   = ["интервью","интервью 2024","интервью 2023",
+                       "комментарий","exclusive interview","цитата"]
+    
+            for q in q_tpl:
+                full_q = f"{fio_cut} {self.c} {q}"
+                if dom:
+                    full_q += f' OR site:{dom}'
+                queries.append(full_q)
+                # ↓ теперь используем именно full_q
+                all_snips += await _snip(sess, full_q, 3)
+    
         if not all_snips:
             return queries, [], "Свежих интервью не найдено."
-        ctx = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in all_snips)[:16_000]
-        sys = ("Собери краткий дайджест интервью: ФИО, роль, дата (если есть), "
-               "краткая суть, ссылка. Без повторов.")
-        summary = await gpt_async([{"role": "system", "content": sys},
-                                   {"role": "user",   "content": ctx}], T=0.15)
+
+        # ---- строим контекст для GPT --------------------------------
+        site_ctx = await _site_snip(sess, dom)
+        ctx = ""
+        if site_ctx:
+            ctx += f"SITE_CONTEXT:\n{site_ctx}\nрынок компании – {self.market}\n\n"
+        ctx += "\n".join(f"URL:{u}\nTXT:{t}" for u,t in all_snips)[:16_000]
+
+        sys = ("ТЫ — АНАЛИТИК-КОНТЕНТОЛОГ. СОЗДАЙ ДАЙДЖЕСТ ТОЛЬКО ТЕХ ИНТЕРВЬЮ, "
+               "КОТОРЫЕ ОТНОСЯТСЯ К НУЖНОЙ КОМПАНИИ И ЕЁ СФЕРЕ. "
+               "ЕСЛИ СНИППЕТ НЕ СООТВЕТСТВУЕТ КОНТЕКСТУ САЙТА/РЫНКА — ПРОПУСТИ ЕГО. "
+               "ДЛЯ КАЖДОГО ОСТАВШЕГОСЯ ИНТЕРВЬЮ ВЫВЕДИ: ФИО, роль, дата, краткая суть (≤2 предложения), ссылка.")
+        summary = await gpt_async([{"role":"system","content":sys},
+                                   {"role":"user",  "content":ctx}], T=0.15)
         return queries, all_snips, summary
 
-    # ---------- orchestrator --------------------------------
+    # ---- orchestrator ---------------------------------------------
     async def _run(self):
         async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15)) as sess:
-
-            names                = await self._get_names(sess)
-            int_q, snips, intsum = await self._get_interviews(sess, names)
+            names = await self._get_names(sess)
+            int_q, snips, int_sum = await self._get_interviews(sess, names)
 
         owners_block = ("Топ-менеджеры и владельцы:\n" + "\n".join(names)
                         if names else "Топ-менеджеры и владельцы не найдены.")
-        summary_html = _linkify(owners_block + "\n\n" + intsum)
+        summary_html = _linkify(owners_block + "\n\n" + int_sum)
 
-        return {"summary": summary_html, "names": names,
-                "queries": int_q, "snippets": snips}
+        return {"summary": summary_html,
+                "names": names,
+                "queries": int_q,
+                "snippets": snips}
 
     def run(self):
         return asyncio.run(self._run())
 
-# ── Streamlit-кэш (24 ч) -----------------------------------
-@st.cache_data(ttl=86_400,
-               show_spinner="🔎 Ищем руководителей и интервью…")
-def get_leaders_rag(company: str):
-    return FastLeadersInterviews(company).run()
+@st.cache_data(
+        ttl=86_400,
+        show_spinner="🔎 Ищем руководителей и интервью…")
+def get_leaders_rag(company:str, website:str="", market:str=""):
+    """
+    Thin wrapper: возвращает dict(summary, names, queries, snippets)
+    с кешированием на сутки.
+    """
+    return FastLeadersInterviews(company, website, market).run()
 
 
 
 
+
+
+
+@st.cache_data(ttl=3_600)
+def ck_company(inn):
+    r = requests.get("https://api.checko.ru/v2/company",
+                     params={"key": KEYS["CHECKO_API_KEY"], "inn": inn}, timeout=10)
+    r.raise_for_status(); return r.json()["data"]
+
+@st.cache_data(ttl=3_600)
+def ck_fin(inn):
+    r = requests.get("https://api.checko.ru/v2/finances",
+                     params={"key": KEYS["CHECKO_API_KEY"], "inn": inn}, timeout=10)
+    r.raise_for_status(); return r.json()["data"]
 
 
 
@@ -360,17 +505,19 @@ def get_leaders_rag(company: str):
 
 
 # ╭─🎛  UI ────────────────────────────────────────────╮
-st.title("📊 Company Insight — Checko + GPT-4o")
-st.markdown("Введите данные (каждая компания — в одной строке):")
+st.title("📊 AI Company Insight")
+st.markdown("Введите данные (каждая компания — в отдельной строке).")
 
-c1, c2, c3 = st.columns(3)
-with c1: inns  = st.text_area("ИНН",        key="inns_in")
-with c2: names = st.text_area("Название",   key="names_in")
-with c3: mkts  = st.text_area("Рынок",      key="mkts_in")
+c1,c2,c3,c4=st.columns(4)
+with c1: inns = st.text_area("ИНН", key="inns")
+with c2: names= st.text_area("Название", key="names")
+with c3: mkts = st.text_area("Рынок", key="mkts")
+with c4: sites= st.text_area("Сайт", key="sites")
 
-inns  = [i.strip() for i in inns.splitlines()  if i.strip()]
-names = [i.strip() for i in names.splitlines() if i.strip()]
-mkts  = [i.strip() for i in mkts.splitlines()  if i.strip()]
+split = lambda s:[i.strip() for i in s.splitlines() if i.strip()]
+inns,names,mkts,sites = map(split, (inns,names,mkts,sites))
+if sites and len(sites)!=len(names):
+    st.warning("Число строк «Сайт» должно совпадать."); st.stop()
 
 if st.button("🔍 Получить данные"):
     # --- валидация ---
@@ -380,16 +527,17 @@ if st.button("🔍 Получить данные"):
         st.error("Число строк должно совпадать."); st.stop()
 
     # --- вкладки по компаниям ---
+    # --- вкладки по компаниям ---
     tabs = st.tabs([f"{n} ({inn})" for inn, n in zip(inns, names)])
     YEARS = ["2022", "2023", "2024"]
-    for tab, inn, name, mkt in zip(tabs, inns, names, mkts):
+    
+    # --- Подготовим список сайтов такой же длины как и имена компаний
+    sites_full = sites if sites and len(sites) == len(names) else [""] * len(names)
+    
+    for tab, inn, name, mkt, site in zip(tabs, inns, names, mkts, sites_full):
         with tab:
             st.header(f"{name} — {inn}")
             st.caption(f"Рынок: **{mkt}**")
-    
-            # --- Checko profile ---
-            st.subheader("🪪 Профиль (Checko)")
-            st.json(ck_company(inn), expanded=False)
     
             # --------- Финансовый профиль ---------
             st.subheader("💰 Финансовый профиль компании")
@@ -465,15 +613,23 @@ if st.button("🔍 Получить данные"):
             ax1.legend(loc="upper left", fontsize=9)
             fig.tight_layout(pad=1.0)
             st.pyplot(fig)
-    
+
+
+
+
+            
+            
             # --- GPT паспорт ---
-            st.subheader("📝 GPT-паспорт")
-            res = get_rag(name)
-            passport_html = _linkify(res['summary']).replace(chr(10), '<br>')
-            st.markdown(
-                f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                f"border-radius:8px;padding:18px;line-height:1.55'>{passport_html}</div>",
-                unsafe_allow_html=True)
+            st.subheader("📝 Описание компании")
+            with st.spinner("Генерируем описание компании…"):
+                r = RAG(name, website=site, market=mkt).run()
+                passport_html = _linkify(r['summary']).replace('\n', '<br>')
+                st.markdown(
+                    f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                    f"border-radius:8px;padding:18px;line-height:1.55'>{passport_html}</div>",
+                    unsafe_allow_html=True
+                )
+
     
             with st.expander("⚙️ Запросы"):
                 for i, q in enumerate(res["queries"], 1):
@@ -529,14 +685,13 @@ if st.button("🔍 Получить данные"):
             # ─────────── 👥 Руководители и интервью ────────────
             st.subheader("👥 Руководители и интервью")
             with st.spinner("Собираем руководителей и интервью…"):
-                lead_res = get_leaders_rag(name)
-            
+                lead_res = get_leaders_rag(name, website=site, market=mkt)
             st.markdown(
                 f"<div style='background:#F9FAFB;border:1px solid #ddd;"
                 f"border-radius:8px;padding:18px;line-height:1.55'>"
                 f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
                 unsafe_allow_html=True)
-            
+                
             with st.expander("⚙️ Запросы к Google"):
                 for i, q in enumerate(lead_res["queries"][:20], 1):
                     st.markdown(f"**{i}.** {q}")
@@ -555,6 +710,12 @@ if st.button("🔍 Получить данные"):
                     
 
 
+
+
+
+
+
+# In[9]:
 
 
 
