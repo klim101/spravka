@@ -623,6 +623,7 @@ if st.button("🔍 Получить данные"):
             st.subheader("📝 Описание компании")
             with st.spinner("Генерируем описание компании…"):
                 r = RAG(name, website=site, market=mkt).run()
+                res = r
                 passport_html = _linkify(r['summary']).replace('\n', '<br>')
                 st.markdown(
                     f"<div style='background:#F7F9FA;border:1px solid #ccc;"
@@ -665,22 +666,7 @@ if st.button("🔍 Получить данные"):
                         pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
                         use_container_width=True)
 
-                if st.button(f"💾 Скачать полный Word-отчёт — {name}", key=f"word_{inn}"):
-                    # --- паспорт компании ---
-                    passport_text = res["summary"]
-                    # --- финансы ---
-                    # table_df (у тебя он уже есть, но индексы — строки)
-                    finances_df = table_df.set_index("Метрика") if "Метрика" in table_df.columns else table_df
-                    # --- график (fig) --- он у тебя создан выше
-                    # --- рыночный отчет ---
-                    market_text = mkt_res["summary"] if mkt else ""
-   
 
-
-
-                    passport_text = res["summary"]
-                    finances_df = table_df.set_index("Метрика") if "Метрика" in table_df.columns else table_df
-                    market_text = mkt_res["summary"] if mkt else ""
                                 
             # ─────────── 👥 Руководители и интервью ────────────
             st.subheader("👥 Руководители и интервью")
