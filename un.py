@@ -622,8 +622,8 @@ if st.button("🔍 Получить данные"):
             # --- GPT паспорт ---
             st.subheader("📝 Описание компании")
             with st.spinner("Генерируем описание компании…"):
-                r = RAG(name, website=site, market=mkt).run()
-                res = r
+                res_p = RAG(name, website=site, market=mkt).run()
+                
                 passport_html = _linkify(r['summary']).replace('\n', '<br>')
                 st.markdown(
                     f"<div style='background:#F7F9FA;border:1px solid #ccc;"
@@ -633,11 +633,11 @@ if st.button("🔍 Получить данные"):
 
     
             with st.expander("⚙️ Запросы"):
-                for i, q in enumerate(res["queries"], 1):
+                for i, q in enumerate(res_p["queries"], 1):
                     st.markdown(f"**{i}.** {q}")
     
             with st.expander("🔍 Сниппеты (top-15)"):
-                st.dataframe(pd.DataFrame(res["snippets"],
+                st.dataframe(pd.DataFrame(res_p["snippets"],
                             columns=["URL", "Snippet"]).head(15),
                             use_container_width=True)
     
