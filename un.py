@@ -45,7 +45,7 @@ logging.basicConfig(level=logging.WARNING)
 import os, re, html, textwrap, asyncio, logging, nest_asyncio
 import aiohttp, requests, streamlit as st
 import pandas as pd, numpy as np, matplotlib.pyplot as plt
-import tldextract, trafilatura, openai
+import tldextract, openai
 
 
 import html, re
