@@ -20,7 +20,8 @@ cachetools==5.5.2
 certifi==2023.5.7
 cffi==1.17.1
 chardet==5.2.0
-charset-normalizer==3.4.2
+charset-normalizer >= 3.1, < 4
+pywin32>=304 ; platform_system == "Windows"
 click==8.2.1
 colorama==0.4.6
 comm==0.2.2
