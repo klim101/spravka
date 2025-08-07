@@ -39,7 +39,7 @@ KEYS = {
     "DYXLESS_TOKEN": st.secrets["DYXLESS_TOKEN"]
 }
 
-
+DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 
 
 # In[ ]:
