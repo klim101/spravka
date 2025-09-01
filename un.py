@@ -374,6 +374,19 @@ class RAG:
              {"role": "user",   "content": ctx[:20_000]}],
             model=self.llm_model, T=0.25)
 
+    def _normalize_sections(self, summary: str) -> str:
+        sections = summary.split("\n\n")
+        norm = []
+        for sec in sections:
+            lines = [l.strip() for l in sec.splitlines() if l.strip()]
+            seen, uniq = set(), []
+            for line in lines:
+                if line not in seen:
+                    seen.add(line)
+                    uniq.append(line)
+            norm.append("\n".join(uniq) if uniq else "не найдено")
+        return "\n\n".join(norm)
+
     # ---------- orchestrator -------------------------------------------
     async def _run_async(self):
         # paralell: сниппет + детальный паспорт сайта
@@ -434,6 +447,7 @@ class RAG:
 
         # ---------- финальный отчёт ----------------------------------
         summary = await self._summary("\n\n".join(ctx_parts))
+        summary = self._normalize_sections(summary)
 
         return {
             "summary":     summary,
