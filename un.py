@@ -418,10 +418,11 @@ class RAG:
     async def _run_async(self):
         # paralell: сниппет + детальный паспорт сайта
         site_ctx_task = asyncio.create_task(self._site_ctx())
-        site_pass_task = (
-            asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
-            if self.website else None
-        )
+        site_pass_task = None
+        if self.website:
+            site_pass_task = asyncio.create_task(
+                asyncio.to_thread(_site_passport_sync, self.website)
+            )
         
 
         queries, snippets, hist = [], [], ""
