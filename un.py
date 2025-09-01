@@ -19,7 +19,7 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 import openai
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Callable
 import json
 import streamlit as st
 from collections import defaultdict
@@ -40,6 +40,118 @@ KEYS = {
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
+
+# доступные отраслевые группы
+GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
+          "Logistics", "FIG", "Services", "Agro", "TMT"]
+
+# дополнительные шаблоны запросов по отраслям
+GROUP_QUERY_TEMPLATES: dict[str, list[Callable[[str], str]]] = {
+    "Industrials": [
+        lambda c: f'"{c}" объём производства',
+        lambda c: f'"{c}" производственная мощность',
+        lambda c: f'"{c}" фабрика',
+        lambda c: f'"{c}" логистика',
+        lambda c: f'"{c}" оборудование',
+        lambda c: f'"{c}" r&d',
+        lambda c: f'"{c}" патенты',
+        lambda c: f'"{c}" сертификат ISO',
+        lambda c: f'"{c}" список оборудования',
+        lambda c: f'"{c}" виды продукции',
+    ],
+    "Consumer": [
+        lambda c: f'"{c}" бренды',
+        lambda c: f'"{c}" логотип',
+        lambda c: f'"{c}" целевая аудитория',
+    ],
+    "O&G": [
+        lambda c: f'"{c}" объём добычи',
+        lambda c: f'"{c}" переработка',
+        lambda c: f'"{c}" запасы',
+    ],
+    "M&M": [
+        lambda c: f'"{c}" объём добычи',
+        lambda c: f'"{c}" запасы',
+    ],
+    "Retail": [
+        lambda c: f'"{c}" количество магазинов',
+        lambda c: f'"{c}" площадь магазинов',
+        lambda c: f'"{c}" квадратные метры',
+    ],
+    "Logistics": [
+        lambda c: f'"{c}" парк',
+        lambda c: f'"{c}" объём грузов',
+        lambda c: f'"{c}" объём пассажиров',
+    ],
+    "FIG": [
+        lambda c: f'"{c}" баланс',
+        lambda c: f'"{c}" чистые активы',
+        lambda c: f'"{c}" процентный доход',
+        lambda c: f'"{c}" комиссионный доход',
+        lambda c: f'"{c}" доход от страхования',
+    ],
+    "Services": [
+        lambda c: f'"{c}" gmv услуг',
+        lambda c: f'"{c}" проникновение',
+    ],
+    "Agro": [
+        lambda c: f'"{c}" площадь земли',
+        lambda c: f'"{c}" регион',
+        lambda c: f'"{c}" культуры',
+        lambda c: f'"{c}" животные',
+        lambda c: f'"{c}" объём производства',
+        lambda c: f'"{c}" склады',
+        lambda c: f'"{c}" элеваторы',
+    ],
+    "TMT": [
+        lambda c: f'"{c}" количество пользователей',
+        lambda c: f'"{c}" ежедневные просмотры',
+        lambda c: f'"{c}" проникновение',
+        lambda c: f'"{c}" операционные показатели',
+        lambda c: f'"{c}" gmv',
+        lambda c: f'"{c}" gbv',
+        lambda c: f'"{c}" количество просмотров',
+    ],
+}
+
+# подсказки для summary по отраслям
+GROUP_SUMMARY_HINTS: dict[str, str] = {
+    "Industrials": (
+        "учитывай объём производства и capacity, расположение фабрики, "
+        "логистику, описание оборудования, наличие R&D и патентов, "
+        "сертификаты ISO, список оборудования с характеристиками и виды продукции"
+    ),
+    "Consumer": (
+        "добавляй описание брендов с логотипами и целевую аудиторию"
+    ),
+    "O&G": (
+        "указывай объём добычи, переработки, запасы и ресурсы"
+    ),
+    "M&M": (
+        "указывай объём добычи, запасы и ресурсы"
+    ),
+    "Retail": (
+        "приводи количество и площадь магазинов, общую площадь в кв. метрах"
+    ),
+    "Logistics": (
+        "описывай парк и объёмы грузов или пассажиров"
+    ),
+    "FIG": (
+        "добавляй баланс, чистые активы, процентный и комиссионный доход, "
+        "доход от страхования и прочих финансовых продуктов"
+    ),
+    "Services": (
+        "указывай GMV услуг и уровень проникновения"
+    ),
+    "Agro": (
+        "описывай объём земли и регион, выращиваемые культуры или животных, "
+        "объёмы производства, наличие складов и элеваторов"
+    ),
+    "TMT": (
+        "приводи количество пользователей, ежедневные просмотры, проникновение, "
+        "релевантные операционные и крупные финансовые показатели"
+    ),
+}
 
 
 # In[ ]:
@@ -273,13 +385,15 @@ class RAG:
     summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
     queries    – запросы, которые LLM сгенерировала для Google
     snippets   – список (url, text) из Google
+    news_snippets – сниппеты с крупных новостных сайтов
     site_ctx   – короткий сниппет «site:<домен> …»
     site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
     """
     def __init__(self, company: str, *, website: str = "", market: str = "",
                  years=(2022, 2023, 2024), country: str = "Россия",
                  steps: int = 3, snips: int = 4,
-                 llm_model: str = "gpt-4o-mini",company_info: dict | None = None,):
+                 llm_model: str = "gpt-4o-mini", company_info: dict | None = None,
+                 group: str = ""):
         self.company   = company.strip()
         self.website   = website.strip()
         self.market    = market.strip()
@@ -289,6 +403,7 @@ class RAG:
         self.snips     = snips
         self.llm_model = llm_model
         self.company_info = company_info or {}
+        self.group = group.strip()
 
     # ---------- site-snippet из Google ---------------------------------
     async def _site_ctx(self) -> str:
@@ -303,9 +418,10 @@ class RAG:
         dom  = tldextract.extract(self.website).registered_domain if self.website else ""
         base = f'"{self.company}"' + (f' OR site:{dom}' if dom else "")
         sys  = (
-            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 20 ТОЧНЫХ GOOGLE-ЗАПРОСОВ, "
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ НЕ МЕНЕЕ 30 ПРОСТЫХ РАЗНООБРАЗНЫХ GOOGLE-ЗАПРОСОВ НА РУССКОМ ЯЗЫКЕ, "
             f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
             f"({self.country}, {', '.join(map(str, self.years))}).\n"
+            "КАЖДЫЙ ЗАПРОС ОБЯЗАТЕЛЬНО ДОЛЖЕН СОДЕРЖАТЬ НАЗВАНИЕ КОМПАНИИ.\n"
             "### ОБЯЗАТЕЛЬНЫЕ БЛОКИ\n"
             "1. ОПИСАНИЕ КОМПАНИИ И БРЕНДЫ.\n"
             "2. ЧИСЛЕННОСТЬ СОТРУДНИКОВ.\n"
@@ -317,7 +433,7 @@ class RAG:
             "8. ПРИБЫЛЬ И ОБЪЁМЫ ПРОДУКЦИИ.\n"
             "9. КОНКУРЕНТЫ (НАЗВАНИЕ И САЙТ).\n"
             "10. УПОМИНАНИЯ НА ФОРУМАХ И В РЕЙТИНГАХ.\n"
-            "ДЛЯ КАЖДОГО БЛОКА СДЕЛАЙ МИНИМУМ ПО ОДНОМУ ЗАПРОСУ НА РУССКОМ И ОДНОМ НА АНГЛИЙСКОМ.\n"
+            "ПО КАЖДОМУ БЛОКУ СДЕЛАЙ НЕСКОЛЬКО РАЗНЫХ ЗАПРОСОВ.\n"
             "### СОВЕТЫ ПО КОНСТРУКЦИИ ЗАПРОСОВ\n"
             "- ИСПОЛЬЗУЙ ОПЕРАТОРЫ: `site:`, `intitle:`, `inurl:`, `filetype:pdf`, `OR`.\n"
             "- ДОБАВЛЯЙ ГОДЫ И НАЗВАНИЯ ПРОДУКТОВ И БРЕНДОВ, ЕСЛИ НУЖНО.\n"
@@ -333,11 +449,45 @@ class RAG:
             "4. СКОМБИНИРОВАТЬ их с операторами.\n"
             "5. ВЫВЕСТИ строки `QUERY:`.\n"
         )
+        if self.group:
+            sys += f"КОМПАНИЯ ПРИНАДЛЕЖИТ К СЕКТОРУ {self.group}. ДОБАВЬ ЗАПРОСЫ, УЧИТЫВАЮЩИЕ ОСОБЕННОСТИ ЭТОЙ ОТРАСЛИ.\n"
         raw = await _gpt(
             [{"role": "system", "content": sys},
              {"role": "user",   "content": f'base={base}{hist}'}],
             model=self.llm_model, T=0.1)
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+
+        if not hist:
+            base_templates = [
+                f'"{self.company}" описание',
+                f'"{self.company}" бренды',
+                f'"{self.company}" сотрудники',
+                f'"{self.company}" численность',
+                f'"{self.company}" персонал',
+                f'"{self.company}" штат',
+                f'"{self.company}" headcount',
+                f'"{self.company}" производственные мощности',
+                f'"{self.company}" производственная мощность',
+                f'"{self.company}" мощность завода',
+                f'"{self.company}" производительность',
+                f'"{self.company}" capacity',
+                f'"{self.company}" инвестиции',
+                f'"{self.company}" расширение',
+                f'"{self.company}" адрес',
+                f'"{self.company}" история',
+                f'"{self.company}" прибыль',
+                f'"{self.company}" объём производства',
+                f'"{self.company}" конкуренты',
+                f'"{self.company}" конкуренты Россия',
+                f'"{self.company}" аналоги',
+                f'"{self.company}" competitors',
+                f'"{self.company}" рейтинг',
+                f'форум "{self.company}"',
+                f'site:news.* "{self.company}"',
+            ]
+            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
+            templates = base_templates + group_templates
+            ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
         social_sites = ["vk.com", "facebook.com", "linkedin.com",
@@ -354,23 +504,29 @@ class RAG:
     # ---------- финальный отчёт ----------------------------------------
     async def _summary(self, ctx: str) -> str:
         sys = (
-            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ В ФОРМЕ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ ПО СЛЕДУЮЩИМ ТЕМАТИЧЕСКИМ БЛОКАМ: "
-            "1) ОПИСАНИЕ (миссия, род деятельности, сфера), "
-            "2) ОБЩАЯ ИНФОРМАЦИЯ (юридический статус, дата и место основания, штаб-квартира), "
-            "3) ПАРТНЁРСТВА (ключевые альянсы и сотрудничества), "
-            "4) НАПРАВЛЕНИЯ (ключевые линии бизнеса и инициативы), "
-            "5) ИСТОРИЯ (вехи развития, ключевые события), "
-            "6) ЦИФРЫ (объёмы производства, доля рынка, активы и др. — КРОМЕ ВЫРУЧКИ), "
-            "7) ПРОДУКТЫ (основные категории товаров и услуг), "
-            "8) ГЕОГРАФИЯ (рынки присутствия, регионы продаж, производственные мощности), "
-            "9) СОТРУДНИКИ (численность персонала, ключевые фигуры, корпоративная культура), "
-            "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
-            "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
-            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
-            "В КОНЦЕ ОТДЕЛЬНО ПЕРЕЧИСЛИ ОФИЦИАЛЬНЫЕ СТРАНИЦЫ КОМПАНИИ В VK, FACEBOOK, LINKEDIN, YOUTUBE, OK.RU И НА ЕЁ САЙТЕ, "
-            "УКАЗЫВАЯ ПОЛНЫЙ URL КАЖДОЙ НАЙДЕННОЙ СЕТИ. "
-            "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ.\n"
+            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ "
+            "АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ ИЗ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ В СЛЕДУЮЩЕМ "
+            "ФИКСИРОВАННОМ ПОРЯДКЕ: "
+            "1) ОПИСАНИЕ; "
+            "2) БРЕНДЫ (перечень и краткое описание); "
+            "3) ЧИСЛЕННОСТЬ СОТРУДНИКОВ; "
+            "4) ПРОИЗВОДСТВЕННЫЕ МОЩНОСТИ (площадь, объёмы по годам/дням); "
+            "5) ИНВЕСТИЦИИ И ПРОЕКТЫ РАСШИРЕНИЯ (сумма, планы, рынки); "
+            "6) АДРЕС HQ И ПРОИЗВОДСТВЕННЫХ ПЛОЩАДОК; "
+            "7) СОЦИАЛЬНЫЕ СЕТИ (ВК, Facebook, LinkedIn, YouTube, Одноклассники, сайт); "
+            "8) ИСТОРИЯ И КЛЮЧЕВЫЕ СОБЫТИЯ; "
+            "9) ПРИБЫЛЬ/ОБЪЁМЫ ПРОДУКЦИИ; "
+            "10) КОНКУРЕНТЫ (названия, сайты, краткое описание); "
+            "11) УЧАСТИЕ В ФОРУМАХ/НОВОСТЯХ/РЕЙТИНГАХ. "
+            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ПОЛНЫЙ URL). "
+            "ЕСЛИ ДАННЫХ НЕТ — ПИШИ 'не найдено'. "
+            "НЕ ДУБЛИРУЙ ИНФОРМАЦИЮ И НЕ ВЫДУМЫВАЙ ФАКТОВ. "
+            "НЕ ИСПОЛЬЗУЙ MARKDOWN, НЕ УКАЗЫВАЙ ВЫРУЧКУ (REVENUE) НИ В КАКОМ ВИДЕ, НО МОЖНО УКАЗЫВАТЬ ПРИБЫЛЬ ПО ПРОДУКТАМ.\n"
         )
+        if self.group:
+            hint = GROUP_SUMMARY_HINTS.get(self.group, "")
+            if hint:
+                sys += f"КОМПАНИЯ ОТНОСИТСЯ К СЕКТОРУ {self.group}. {hint}.\n"
         
         return await _gpt(
             [{"role": "system", "content": sys},
@@ -393,18 +549,15 @@ class RAG:
     # ---------- orchestrator -------------------------------------------
     async def _run_async(self):
         # paralell: сниппет + детальный паспорт сайта
-        site_ctx_task  = asyncio.create_task(self._site_ctx())
-        site_pass_task = None
-        if self.website:
-            # ▸ стало: просто уходим в отдельный поток без внешнего тай-аута
-            site_pass_task = None
-            if self.website:
-                site_pass_task = asyncio.create_task(
-                    asyncio.to_thread(_site_passport_sync, self.website)
-                )
+        site_ctx_task = asyncio.create_task(self._site_ctx())
+        site_pass_task = (
+            asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
+            if self.website else None
+        )
         
 
         queries, snippets, hist = [], [], ""
+        news_snippets: list[tuple[str, str]] = []
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
                 ql = await self._queries(hist)
@@ -414,6 +567,19 @@ class RAG:
                 res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
                 snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
+
+            news_domains = [
+                "rbc.ru",
+                "kommersant.ru",
+                "vedomosti.ru",
+                "tass.ru",
+                "forbes.ru",
+            ]
+            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
+            queries += news_queries
+            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
+            news_snippets = sum(res, [])
+            snippets += news_snippets
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
@@ -474,6 +640,7 @@ class RAG:
             "summary":     summary,
             "queries":     queries,
             "snippets":    snippets,
+            "news_snippets": news_snippets,
             "site_ctx":    site_ctx,
             "site_pass":   site_pass,
             "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
@@ -608,6 +775,21 @@ class FastMarketRAG:
 @st.cache_data(ttl=86_400, show_spinner="🔎 Генерируем рыночный отчёт…")
 def get_market_rag(market):
     return FastMarketRAG(market).run()
+
+
+def _parse_market_volumes(summary: str) -> dict[str, float]:
+    """Извлекает пары год–объём из последнего абзаца рыночного отчёта."""
+    vols: dict[str, float] = {}
+    lines = summary.strip().splitlines()
+    if not lines:
+        return vols
+    last = lines[-1]
+    for year, num in re.findall(r"(20\d{2})[^\d]{0,20}([\d\s,\.]+)", last):
+        try:
+            vols[year] = float(num.replace(" ", "").replace(",", "."))
+        except ValueError:
+            continue
+    return vols
 
 
 
@@ -1024,11 +1206,12 @@ def run_ai_insight_tab() -> None:
     st.title("📊 AI Company Insight")
     st.markdown("Введите данные (каждая компания — в отдельной строке).")
     
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1: inns_raw  = st.text_area("ИНН")          # ✅ без key=* — нам не нужны две копии
     with c2: names_raw = st.text_area("Название")
     with c3: mkts_raw  = st.text_area("Рынок")
     with c4: sites_raw = st.text_area("Сайт")
+    with c5: group_sel = st.selectbox("Группа", GROUPS)
     
     aggregate_mode = st.checkbox("🧮 Суммировать финансы по всем ИНН")
     
@@ -1042,6 +1225,7 @@ def run_ai_insight_tab() -> None:
             names  = split(names_raw)
             mkts   = split(mkts_raw)
             sites  = split(sites_raw)
+            groups = [group_sel] * len(inns)
             
             # ---------- валидация ----------
             if not inns:
@@ -1052,6 +1236,7 @@ def run_ai_insight_tab() -> None:
                 if len(names) == 1 and len(inns) > 1:  names *= len(inns)
                 if len(mkts)  == 1 and len(inns) > 1:  mkts  *= len(inns)
                 if len(sites) == 1 and len(inns) > 1:  sites *= len(inns)
+                if len(groups) == 1 and len(inns) > 1: groups *= len(inns)
             
                 # теперь всё либо пустое, либо совпадает по длине
                 for lst, lbl in [(names, "Название"), (mkts, "Рынок")]:
@@ -1065,12 +1250,15 @@ def run_ai_insight_tab() -> None:
                     st.error("Число строк во всех трёх полях должно совпадать."); st.stop()
                 if sites and len(sites) != len(inns):
                     st.error("Число строк «Сайт» должно совпадать с числом ИНН."); st.stop()
+                if groups and len(groups) != len(inns):
+                    st.error("Число строк «Группа» должно совпадать с числом ИНН."); st.stop()
             
             # ---------- выравниваем длины списков ----------
             pad = lambda lst: lst if lst else [""] * len(inns)
             names_full = pad(names)
             mkts_full  = pad(mkts)
             sites_full = pad(sites)
+            groups_full = pad(groups)
             YEARS = ["2022", "2023", "2024"]
             df_companies = pd.DataFrame([ck_company(i) for i in inns])
 
@@ -1286,7 +1474,7 @@ def run_ai_insight_tab() -> None:
                     # --- единый RAG-пайплайн (Google-сниппеты + сайт) ---------------------
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(first_name, website=first_site, market=first_mkt).run()
+                        doc = RAG(first_name, website=first_site, market=first_mkt, group=groups_full[0]).run()
                     
                     # ----------- вывод основного отчёта -----------------------------------
                     html_main = _linkify(doc["summary"]).replace("\n", "<br>")
@@ -1330,7 +1518,23 @@ def run_ai_insight_tab() -> None:
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-                    
+
+                        vols = _parse_market_volumes(mkt_res["summary"])
+                        if vols:
+                            fig, ax = plt.subplots(figsize=(4, 2))
+                            years = list(vols.keys())
+                            vals = list(vols.values())
+                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
+                            ax.set_xticks(range(len(years)))
+                            ax.set_xticklabels(years)
+                            ax.set_yticks([])
+                            for spine in ax.spines.values():
+                                spine.set_visible(False)
+                            for i, b in enumerate(bars):
+                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
+                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
+                            st.pyplot(fig)
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
@@ -1498,7 +1702,7 @@ def run_ai_insight_tab() -> None:
                     # ────── Описание компании (Google + сайт) ───────────────────────────
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(name, website=site, market=mkt).run()     # ← новая переменная
+                        doc = RAG(name, website=site, market=mkt, group=groups_full[idx]).run()     # ← новая переменная
                     
                     # основной отчёт
                     main_html = _linkify(doc["summary"]).replace("\n", "<br>")
@@ -1535,14 +1739,30 @@ def run_ai_insight_tab() -> None:
                         st.subheader("📈 Рыночный отчёт")
                         with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                             mkt_res = get_market_rag(mkt)
-                    
+
                         mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                         st.markdown(
                             f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-                    
+
+                        vols = _parse_market_volumes(mkt_res["summary"])
+                        if vols:
+                            fig, ax = plt.subplots(figsize=(4, 2))
+                            years = list(vols.keys())
+                            vals = list(vols.values())
+                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
+                            ax.set_xticks(range(len(years)))
+                            ax.set_xticklabels(years)
+                            ax.set_yticks([])
+                            for spine in ax.spines.values():
+                                spine.set_visible(False)
+                            for i, b in enumerate(bars):
+                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
+                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
+                            st.pyplot(fig)
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
