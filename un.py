@@ -273,6 +273,7 @@ class RAG:
     summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
     queries    – запросы, которые LLM сгенерировала для Google
     snippets   – список (url, text) из Google
+    news_snippets – сниппеты с крупных новостных сайтов
     site_ctx   – короткий сниппет «site:<домен> …»
     site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
     """
@@ -424,6 +425,7 @@ class RAG:
         
 
         queries, snippets, hist = [], [], ""
+        news_snippets: list[tuple[str, str]] = []
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
                 ql = await self._queries(hist)
@@ -433,6 +435,19 @@ class RAG:
                 res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
                 snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
+
+            news_domains = [
+                "rbc.ru",
+                "kommersant.ru",
+                "vedomosti.ru",
+                "tass.ru",
+                "forbes.ru",
+            ]
+            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
+            queries += news_queries
+            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
+            news_snippets = sum(res, [])
+            snippets += news_snippets
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
@@ -493,6 +508,7 @@ class RAG:
             "summary":     summary,
             "queries":     queries,
             "snippets":    snippets,
+            "news_snippets": news_snippets,
             "site_ctx":    site_ctx,
             "site_pass":   site_pass,
             "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
