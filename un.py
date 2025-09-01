@@ -461,13 +461,27 @@ class RAG:
 
             base_templates = [
 
+            base_templates = [
+
             templates = [
+
 
                 f'"{self.company}" описание',
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
                 f'"{self.company}" численность',
+
+                f'"{self.company}" персонал',
+                f'"{self.company}" штат',
+                f'"{self.company}" headcount',
                 f'"{self.company}" производственные мощности',
+                f'"{self.company}" производственная мощность',
+                f'"{self.company}" мощность завода',
+                f'"{self.company}" производительность',
+                f'"{self.company}" capacity',
+
+                f'"{self.company}" производственные мощности',
+
                 f'"{self.company}" инвестиции',
                 f'"{self.company}" расширение',
                 f'"{self.company}" адрес',
@@ -475,6 +489,12 @@ class RAG:
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
+
+                f'"{self.company}" конкуренты Россия',
+                f'"{self.company}" аналоги',
+                f'"{self.company}" competitors',
+
+
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
@@ -482,6 +502,11 @@ class RAG:
 
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
+
+
+            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
+            templates = base_templates + group_templates
+
 
 
             ql = templates + [q for q in ql if q not in templates]
@@ -772,6 +797,21 @@ class FastMarketRAG:
 @st.cache_data(ttl=86_400, show_spinner="🔎 Генерируем рыночный отчёт…")
 def get_market_rag(market):
     return FastMarketRAG(market).run()
+
+
+def _parse_market_volumes(summary: str) -> dict[str, float]:
+    """Извлекает пары год–объём из последнего абзаца рыночного отчёта."""
+    vols: dict[str, float] = {}
+    lines = summary.strip().splitlines()
+    if not lines:
+        return vols
+    last = lines[-1]
+    for year, num in re.findall(r"(20\d{2})[^\d]{0,20}([\d\s,\.]+)", last):
+        try:
+            vols[year] = float(num.replace(" ", "").replace(",", "."))
+        except ValueError:
+            continue
+    return vols
 
 
 
@@ -1500,7 +1540,23 @@ def run_ai_insight_tab() -> None:
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-                    
+
+                        vols = _parse_market_volumes(mkt_res["summary"])
+                        if vols:
+                            fig, ax = plt.subplots(figsize=(4, 2))
+                            years = list(vols.keys())
+                            vals = list(vols.values())
+                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
+                            ax.set_xticks(range(len(years)))
+                            ax.set_xticklabels(years)
+                            ax.set_yticks([])
+                            for spine in ax.spines.values():
+                                spine.set_visible(False)
+                            for i, b in enumerate(bars):
+                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
+                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
+                            st.pyplot(fig)
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
@@ -1705,14 +1761,30 @@ def run_ai_insight_tab() -> None:
                         st.subheader("📈 Рыночный отчёт")
                         with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                             mkt_res = get_market_rag(mkt)
-                    
+
                         mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                         st.markdown(
                             f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-                    
+
+                        vols = _parse_market_volumes(mkt_res["summary"])
+                        if vols:
+                            fig, ax = plt.subplots(figsize=(4, 2))
+                            years = list(vols.keys())
+                            vals = list(vols.values())
+                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
+                            ax.set_xticks(range(len(years)))
+                            ax.set_xticklabels(years)
+                            ax.set_yticks([])
+                            for spine in ax.spines.values():
+                                spine.set_visible(False)
+                            for i, b in enumerate(bars):
+                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
+                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
+                            st.pyplot(fig)
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
