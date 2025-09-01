@@ -339,6 +339,15 @@ class RAG:
             model=self.llm_model, T=0.1)
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
+        if not hist:
+            templates = [
+                f'"{self.company}" конкуренты',
+                f'"{self.company}" рейтинг',
+                f'форум "{self.company}"',
+                f'site:news.* "{self.company}"',
+            ]
+            ql = templates + [q for q in ql if q not in templates]
+
         # ─── целевые соцсети и официальный сайт ──────────────────────
         social_sites = ["vk.com", "facebook.com", "linkedin.com",
                         "youtube.com", "ok.ru"]
