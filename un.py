@@ -275,6 +275,7 @@ class RAG:
     snippets   – список (url, text) из Google
     site_ctx   – короткий сниппет «site:<домен> …»
     site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
+    news_snippets – сниппеты с крупных новостных сайтов
     """
     def __init__(self, company: str, *, website: str = "", market: str = "",
                  years=(2022, 2023, 2024), country: str = "Россия",
@@ -348,7 +349,18 @@ class RAG:
             [{"role": "system", "content": sys},
              {"role": "user",   "content": f'base={base}{hist}'}],
             model=self.llm_model, T=0.1)
-        return re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+        ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+
+        if not hist:
+            templates = [
+                f'"{self.company}" конкуренты',
+                f'"{self.company}" рейтинг',
+                f'форум "{self.company}"',
+                f'site:news.* "{self.company}"',
+            ]
+            ql = templates + [q for q in ql if q not in templates]
+
+        return ql
 
     # ---------- финальный отчёт ----------------------------------------
     async def _summary(self, ctx: str) -> str:
@@ -364,7 +376,8 @@ class RAG:
             "8) ГЕОГРАФИЯ (рынки присутствия, регионы продаж, производственные мощности), "
             "9) СОТРУДНИКИ (численность персонала, ключевые фигуры, корпоративная культура), "
             "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
-            "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
+            "11) УЧАСТИЕ В ФОРУМАХ, НОВОСТНЫХ ПУБЛИКАЦИЯХ И РЕЙТИНГАХ (каждое упоминание сопровождай ссылкой), "
+            "12) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
             "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
             "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ.\n"
         )
@@ -389,6 +402,7 @@ class RAG:
         
 
         queries, snippets, hist = [], [], ""
+        news_snippets: list[tuple[str, str]] = []
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
                 ql = await self._queries(hist)
@@ -398,6 +412,19 @@ class RAG:
                 res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
                 snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
+
+            news_domains = [
+                "rbc.ru",
+                "kommersant.ru",
+                "vedomosti.ru",
+                "tass.ru",
+                "forbes.ru",
+            ]
+            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
+            queries += news_queries
+            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
+            news_snippets = sum(res, [])
+            snippets += news_snippets
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
@@ -436,12 +463,13 @@ class RAG:
         summary = await self._summary("\n\n".join(ctx_parts))
 
         return {
-            "summary":     summary,
-            "queries":     queries,
-            "snippets":    snippets,
-            "site_ctx":    site_ctx,
-            "site_pass":   site_pass,
-            "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
+            "summary":      summary,
+            "queries":      queries,
+            "snippets":     snippets,
+            "news_snippets": news_snippets,
+            "site_ctx":     site_ctx,
+            "site_pass":    site_pass,
+            "company_doc":  company_doc_txt   # ← новый ключ (если нужен во фронте)
         }
 
 
