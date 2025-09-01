@@ -420,6 +420,7 @@ class RAG:
         site_ctx_task = asyncio.create_task(self._site_ctx())
         site_pass_task = None
         if self.website:
+            # запускаем паспорт сайта в отдельном потоке, чтобы не блокировать цикл
             site_pass_task = asyncio.create_task(
                 asyncio.to_thread(_site_passport_sync, self.website)
             )
