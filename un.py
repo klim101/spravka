@@ -273,6 +273,7 @@ class RAG:
     summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
     queries    – запросы, которые LLM сгенерировала для Google
     snippets   – список (url, text) из Google
+    news_snippets – сниппеты с крупных новостных сайтов
     site_ctx   – короткий сниппет «site:<домен> …»
     site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
     """
@@ -303,9 +304,10 @@ class RAG:
         dom  = tldextract.extract(self.website).registered_domain if self.website else ""
         base = f'"{self.company}"' + (f' OR site:{dom}' if dom else "")
         sys  = (
-            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 20 ТОЧНЫХ GOOGLE-ЗАПРОСОВ, "
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ НЕ МЕНЕЕ 30 ПРОСТЫХ РАЗНООБРАЗНЫХ GOOGLE-ЗАПРОСОВ НА РУССКОМ ЯЗЫКЕ, "
             f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
             f"({self.country}, {', '.join(map(str, self.years))}).\n"
+            "КАЖДЫЙ ЗАПРОС ОБЯЗАТЕЛЬНО ДОЛЖЕН СОДЕРЖАТЬ НАЗВАНИЕ КОМПАНИИ.\n"
             "### ОБЯЗАТЕЛЬНЫЕ БЛОКИ\n"
             "1. ОПИСАНИЕ КОМПАНИИ И БРЕНДЫ.\n"
             "2. ЧИСЛЕННОСТЬ СОТРУДНИКОВ.\n"
@@ -317,7 +319,7 @@ class RAG:
             "8. ПРИБЫЛЬ И ОБЪЁМЫ ПРОДУКЦИИ.\n"
             "9. КОНКУРЕНТЫ (НАЗВАНИЕ И САЙТ).\n"
             "10. УПОМИНАНИЯ НА ФОРУМАХ И В РЕЙТИНГАХ.\n"
-            "ДЛЯ КАЖДОГО БЛОКА СДЕЛАЙ МИНИМУМ ПО ОДНОМУ ЗАПРОСУ НА РУССКОМ И ОДНОМ НА АНГЛИЙСКОМ.\n"
+            "ПО КАЖДОМУ БЛОКУ СДЕЛАЙ НЕСКОЛЬКО РАЗНЫХ ЗАПРОСОВ.\n"
             "### СОВЕТЫ ПО КОНСТРУКЦИИ ЗАПРОСОВ\n"
             "- ИСПОЛЬЗУЙ ОПЕРАТОРЫ: `site:`, `intitle:`, `inurl:`, `filetype:pdf`, `OR`.\n"
             "- ДОБАВЛЯЙ ГОДЫ И НАЗВАНИЯ ПРОДУКТОВ И БРЕНДОВ, ЕСЛИ НУЖНО.\n"
@@ -341,6 +343,17 @@ class RAG:
 
         if not hist:
             templates = [
+                f'"{self.company}" описание',
+                f'"{self.company}" бренды',
+                f'"{self.company}" сотрудники',
+                f'"{self.company}" численность',
+                f'"{self.company}" производственные мощности',
+                f'"{self.company}" инвестиции',
+                f'"{self.company}" расширение',
+                f'"{self.company}" адрес',
+                f'"{self.company}" история',
+                f'"{self.company}" прибыль',
+                f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
@@ -412,6 +425,7 @@ class RAG:
         
 
         queries, snippets, hist = [], [], ""
+        news_snippets: list[tuple[str, str]] = []
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
                 ql = await self._queries(hist)
@@ -421,6 +435,19 @@ class RAG:
                 res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
                 snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
+
+            news_domains = [
+                "rbc.ru",
+                "kommersant.ru",
+                "vedomosti.ru",
+                "tass.ru",
+                "forbes.ru",
+            ]
+            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
+            queries += news_queries
+            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
+            news_snippets = sum(res, [])
+            snippets += news_snippets
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
@@ -481,6 +508,7 @@ class RAG:
             "summary":     summary,
             "queries":     queries,
             "snippets":    snippets,
+            "news_snippets": news_snippets,
             "site_ctx":    site_ctx,
             "site_pass":   site_pass,
             "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
