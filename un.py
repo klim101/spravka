@@ -304,10 +304,11 @@ class RAG:
         dom  = tldextract.extract(self.website).registered_domain if self.website else ""
         base = f'"{self.company}"' + (f' OR site:{dom}' if dom else "")
         sys  = (
-            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ НЕ МЕНЕЕ 30 ПРОСТЫХ РАЗНООБРАЗНЫХ GOOGLE-ЗАПРОСОВ НА РУССКОМ ЯЗЫКЕ, "
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ НЕ МЕНЕЕ 30 ПРОСТЫХ РАЗНООБРАЗНЫХ GOOGLE-ЗАПРОСОВ, "
             f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
             f"({self.country}, {', '.join(map(str, self.years))}).\n"
             "КАЖДЫЙ ЗАПРОС ОБЯЗАТЕЛЬНО ДОЛЖЕН СОДЕРЖАТЬ НАЗВАНИЕ КОМПАНИИ.\n"
+            "ДЛЯ КАЖДОГО ИЗ НИЖЕСЛЕДУЮЩИХ БЛОКОВ СФОРМИРУЙ МИНИМУМ ПО ОДНОМУ ЗАПРОСУ НА РУССКОМ И ОДНОМ НА АНГЛИЙСКОМ ЯЗЫКЕ.\n"
             "### ОБЯЗАТЕЛЬНЫЕ БЛОКИ\n"
             "1. ОПИСАНИЕ КОМПАНИИ И БРЕНДЫ.\n"
             "2. ЧИСЛЕННОСТЬ СОТРУДНИКОВ.\n"
@@ -319,7 +320,6 @@ class RAG:
             "8. ПРИБЫЛЬ И ОБЪЁМЫ ПРОДУКЦИИ.\n"
             "9. КОНКУРЕНТЫ (НАЗВАНИЕ И САЙТ).\n"
             "10. УПОМИНАНИЯ НА ФОРУМАХ И В РЕЙТИНГАХ.\n"
-            "ПО КАЖДОМУ БЛОКУ СДЕЛАЙ НЕСКОЛЬКО РАЗНЫХ ЗАПРОСОВ.\n"
             "### СОВЕТЫ ПО КОНСТРУКЦИИ ЗАПРОСОВ\n"
             "- ИСПОЛЬЗУЙ ОПЕРАТОРЫ: `site:`, `intitle:`, `inurl:`, `filetype:pdf`, `OR`.\n"
             "- ДОБАВЛЯЙ ГОДЫ И НАЗВАНИЯ ПРОДУКТОВ И БРЕНДОВ, ЕСЛИ НУЖНО.\n"
@@ -344,19 +344,33 @@ class RAG:
         if not hist:
             templates = [
                 f'"{self.company}" описание',
+                f'"{self.company}" description',
                 f'"{self.company}" бренды',
+                f'"{self.company}" brands',
                 f'"{self.company}" сотрудники',
+                f'"{self.company}" employees',
                 f'"{self.company}" численность',
+                f'"{self.company}" headcount',
                 f'"{self.company}" производственные мощности',
+                f'"{self.company}" production capacity',
                 f'"{self.company}" инвестиции',
+                f'"{self.company}" investments',
                 f'"{self.company}" расширение',
+                f'"{self.company}" expansion',
                 f'"{self.company}" адрес',
+                f'"{self.company}" address',
                 f'"{self.company}" история',
+                f'"{self.company}" history',
                 f'"{self.company}" прибыль',
+                f'"{self.company}" profit',
                 f'"{self.company}" объём производства',
+                f'"{self.company}" production volume',
                 f'"{self.company}" конкуренты',
+                f'"{self.company}" competitors',
                 f'"{self.company}" рейтинг',
+                f'"{self.company}" rating',
                 f'форум "{self.company}"',
+                f'forum "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
             ql = templates + [q for q in ql if q not in templates]
@@ -418,12 +432,10 @@ class RAG:
     async def _run_async(self):
         # paralell: сниппет + детальный паспорт сайта
         site_ctx_task = asyncio.create_task(self._site_ctx())
-        site_pass_task = None
-        if self.website:
-            # запускаем паспорт сайта в отдельном потоке, чтобы не блокировать цикл
-            site_pass_task = asyncio.create_task(
-                asyncio.to_thread(_site_passport_sync, self.website)
-            )
+        site_pass_task = (
+            asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
+            if self.website else None
+        )
         
 
         queries, snippets, hist = [], [], ""
