@@ -348,7 +348,19 @@ class RAG:
             [{"role": "system", "content": sys},
              {"role": "user",   "content": f'base={base}{hist}'}],
             model=self.llm_model, T=0.1)
-        return re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+        ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+
+        # ─── целевые соцсети и официальный сайт ──────────────────────
+        social_sites = ["vk.com", "facebook.com", "linkedin.com",
+                        "youtube.com", "ok.ru"]
+        extras = [f'"{self.company}" site:{s}' for s in social_sites]
+        if dom:
+            extras.append(f'"{self.company}" site:{dom}')
+
+        # dedup сохраняя порядок
+        ql.extend(extras)
+        ql = list(dict.fromkeys(ql))
+        return ql
 
     # ---------- финальный отчёт ----------------------------------------
     async def _summary(self, ctx: str) -> str:
@@ -366,6 +378,8 @@ class RAG:
             "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
             "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
             "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
+            "В КОНЦЕ ОТДЕЛЬНО ПЕРЕЧИСЛИ ОФИЦИАЛЬНЫЕ СТРАНИЦЫ КОМПАНИИ В VK, FACEBOOK, LINKEDIN, YOUTUBE, OK.RU И НА ЕЁ САЙТЕ, "
+            "УКАЗЫВАЯ ПОЛНЫЙ URL КАЖДОЙ НАЙДЕННОЙ СЕТИ. "
             "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ.\n"
         )
         
@@ -402,6 +416,17 @@ class RAG:
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
 
+        # выделяем сниппеты с соцсетями
+        dom = tldextract.extract(self.website).registered_domain if self.website else ""
+        social_domains = ["vk.com", "facebook.com", "linkedin.com",
+                          "youtube.com", "ok.ru"]
+        if dom:
+            social_domains.append(dom)
+        social_snips = [
+            (u, t) for u, t in snippets
+            if any(sd in u.lower() or sd in t.lower() for sd in social_domains)
+        ]
+
         # ---------- собираем единый контекст для GPT -----------------
         ctx_parts: list[str] = []
 
@@ -427,7 +452,14 @@ class RAG:
             if company_doc_txt:
                 ctx_parts.append(f"COMPANY_DOC:\n{company_doc_txt}")
 
-        # 4) Google-сниппеты
+        # 4) соцсети
+        if social_snips:
+            ctx_parts.append(
+                "SOCIAL_SNIPPETS:\n" +
+                "\n".join(f"URL:{u}\nTXT:{t}" for u, t in social_snips)
+            )
+
+        # 5) Google-сниппеты
         ctx_parts.append(
             "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snippets)
         )
