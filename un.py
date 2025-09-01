@@ -458,7 +458,11 @@ class RAG:
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
         if not hist:
+
             base_templates = [
+
+            templates = [
+
                 f'"{self.company}" описание',
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
@@ -475,8 +479,11 @@ class RAG:
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
+
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
+
+
             ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
