@@ -41,6 +41,7 @@ KEYS = {
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 
+
 # --- cache for Google queries ---
 CACHE_FILE = Path(".google_cache.pkl")
 try:
@@ -61,6 +62,7 @@ def clear_google_cache():
     GOOGLE_CACHE.clear()
     QUERY_HISTORY.clear()
     _save_cache()
+
 
 # доступные отраслевые группы
 GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
@@ -491,6 +493,7 @@ class RAG:
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
                 f'"{self.company}" численность',
+
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" персонал',
                 f'"{self.company}" штат',
@@ -506,18 +509,34 @@ class RAG:
                 f'"{self.company}" адрес',
                 f'"{self.company}" офис',
                 f'"{self.company}" производство адрес',
+                f'"{self.company}" количество сотрудников',
+                f'"{self.company}" штат',
+                f'"{self.company}" headcount',
+                f'"{self.company}" мощность завода',
+                f'"{self.company}" производительность',
+                f'"{self.company}" capacity',
+                f'"{self.company}" производственные мощности',
+                f'"{self.company}" инвестиции',
+                f'"{self.company}" расширение',
+                f'"{self.company}" адрес',
+
                 f'"{self.company}" история',
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
                 f'"{self.company}" конкуренты Россия',
                 f'"{self.company}" аналоги',
+
+                f'"{self.company}" competitors',
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
+
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
+
+
             ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
