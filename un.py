@@ -175,6 +175,141 @@ GROUP_SUMMARY_HINTS: dict[str, str] = {
 }
 
 
+# --- cache for Google queries ---
+CACHE_FILE = Path(".google_cache.pkl")
+try:
+    _cache = pickle.loads(CACHE_FILE.read_bytes())
+    GOOGLE_CACHE = _cache.get("cache", {})
+    QUERY_HISTORY = _cache.get("history", [])
+except Exception:
+    GOOGLE_CACHE, QUERY_HISTORY = {}, []
+
+def _save_cache():
+    try:
+        CACHE_FILE.write_bytes(pickle.dumps({"cache": GOOGLE_CACHE,
+                                             "history": QUERY_HISTORY}))
+    except Exception:
+        pass
+
+def clear_google_cache():
+    GOOGLE_CACHE.clear()
+    QUERY_HISTORY.clear()
+    _save_cache()
+
+
+# доступные отраслевые группы
+GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
+          "Logistics", "FIG", "Services", "Agro", "TMT"]
+
+# дополнительные шаблоны запросов по отраслям
+GROUP_QUERY_TEMPLATES: dict[str, list[Callable[[str], str]]] = {
+    "Industrials": [
+        lambda c: f'"{c}" объём производства',
+        lambda c: f'"{c}" производственная мощность',
+        lambda c: f'"{c}" фабрика',
+        lambda c: f'"{c}" логистика',
+        lambda c: f'"{c}" оборудование',
+        lambda c: f'"{c}" r&d',
+        lambda c: f'"{c}" патенты',
+        lambda c: f'"{c}" сертификат ISO',
+        lambda c: f'"{c}" список оборудования',
+        lambda c: f'"{c}" виды продукции',
+    ],
+    "Consumer": [
+        lambda c: f'"{c}" бренды',
+        lambda c: f'"{c}" логотип',
+        lambda c: f'"{c}" целевая аудитория',
+    ],
+    "O&G": [
+        lambda c: f'"{c}" объём добычи',
+        lambda c: f'"{c}" переработка',
+        lambda c: f'"{c}" запасы',
+    ],
+    "M&M": [
+        lambda c: f'"{c}" объём добычи',
+        lambda c: f'"{c}" запасы',
+    ],
+    "Retail": [
+        lambda c: f'"{c}" количество магазинов',
+        lambda c: f'"{c}" площадь магазинов',
+        lambda c: f'"{c}" квадратные метры',
+    ],
+    "Logistics": [
+        lambda c: f'"{c}" парк',
+        lambda c: f'"{c}" объём грузов',
+        lambda c: f'"{c}" объём пассажиров',
+    ],
+    "FIG": [
+        lambda c: f'"{c}" баланс',
+        lambda c: f'"{c}" чистые активы',
+        lambda c: f'"{c}" процентный доход',
+        lambda c: f'"{c}" комиссионный доход',
+        lambda c: f'"{c}" доход от страхования',
+    ],
+    "Services": [
+        lambda c: f'"{c}" gmv услуг',
+        lambda c: f'"{c}" проникновение',
+    ],
+    "Agro": [
+        lambda c: f'"{c}" площадь земли',
+        lambda c: f'"{c}" регион',
+        lambda c: f'"{c}" культуры',
+        lambda c: f'"{c}" животные',
+        lambda c: f'"{c}" объём производства',
+        lambda c: f'"{c}" склады',
+        lambda c: f'"{c}" элеваторы',
+    ],
+    "TMT": [
+        lambda c: f'"{c}" количество пользователей',
+        lambda c: f'"{c}" ежедневные просмотры',
+        lambda c: f'"{c}" проникновение',
+        lambda c: f'"{c}" операционные показатели',
+        lambda c: f'"{c}" gmv',
+        lambda c: f'"{c}" gbv',
+        lambda c: f'"{c}" количество просмотров',
+    ],
+}
+
+# подсказки для summary по отраслям
+GROUP_SUMMARY_HINTS: dict[str, str] = {
+    "Industrials": (
+        "учитывай объём производства и capacity, расположение фабрики, "
+        "логистику, описание оборудования, наличие R&D и патентов, "
+        "сертификаты ISO, список оборудования с характеристиками и виды продукции"
+    ),
+    "Consumer": (
+        "добавляй описание брендов с логотипами и целевую аудиторию"
+    ),
+    "O&G": (
+        "указывай объём добычи, переработки, запасы и ресурсы"
+    ),
+    "M&M": (
+        "указывай объём добычи, запасы и ресурсы"
+    ),
+    "Retail": (
+        "приводи количество и площадь магазинов, общую площадь в кв. метрах"
+    ),
+    "Logistics": (
+        "описывай парк и объёмы грузов или пассажиров"
+    ),
+    "FIG": (
+        "добавляй баланс, чистые активы, процентный и комиссионный доход, "
+        "доход от страхования и прочих финансовых продуктов"
+    ),
+    "Services": (
+        "указывай GMV услуг и уровень проникновения"
+    ),
+    "Agro": (
+        "описывай объём земли и регион, выращиваемые культуры или животных, "
+        "объёмы производства, наличие складов и элеваторов"
+    ),
+    "TMT": (
+        "приводи количество пользователей, ежедневные просмотры, проникновение, "
+        "релевантные операционные и крупные финансовые показатели"
+    ),
+}
+
+
 # In[ ]:
 
 
@@ -491,14 +626,18 @@ class RAG:
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
                 f'"{self.company}" численность',
+
                 f'"{self.company}" численность персонала',
                 f'"{self.company}" число работников',
+
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" персонал',
                 f'"{self.company}" штат',
                 f'"{self.company}" производственные мощности',
                 f'"{self.company}" производственная мощность',
+
                 f'"{self.company}" производственная площадка',
+
                 f'"{self.company}" мощность завода',
                 f'"{self.company}" объём выпуска',
                 f'"{self.company}" производительность',
@@ -509,18 +648,38 @@ class RAG:
                 f'"{self.company}" адрес',
                 f'"{self.company}" офис',
                 f'"{self.company}" производство адрес',
+
+                f'"{self.company}" количество сотрудников',
+                f'"{self.company}" штат',
+                f'"{self.company}" headcount',
+                f'"{self.company}" мощность завода',
+                f'"{self.company}" производительность',
+                f'"{self.company}" capacity',
+                f'"{self.company}" производственные мощности',
+                f'"{self.company}" инвестиции',
+                f'"{self.company}" расширение',
+                f'"{self.company}" адрес',
+
+
                 f'"{self.company}" история',
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
                 f'"{self.company}" конкуренты Россия',
                 f'"{self.company}" аналоги',
+
+
+                f'"{self.company}" competitors',
+
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
+
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
+
+
             ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
