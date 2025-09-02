@@ -16,7 +16,6 @@ import requests
 import pandas as pd
 import re
 import numpy as np
-import requests
 from bs4 import BeautifulSoup
 import openai
 from typing import List, Dict, Any, Tuple, Callable
@@ -24,13 +23,14 @@ import json
 import streamlit as st
 from collections import defaultdict
 import asyncio, aiohttp, re, textwrap, nest_asyncio, openai, tiktoken
-from collections import defaultdict
 from urllib.parse import urlparse
 import tldextract, re, asyncio, aiohttp                      # если tldextract уже импортирован – эту строку можно короче
-from functools import partial  
+from functools import partial
 import threading
 import time
 import functools
+import pickle
+from pathlib import Path
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
     "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
@@ -40,6 +40,29 @@ KEYS = {
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
+
+
+# --- cache for Google queries ---
+CACHE_FILE = Path(".google_cache.pkl")
+try:
+    _cache = pickle.loads(CACHE_FILE.read_bytes())
+    GOOGLE_CACHE = _cache.get("cache", {})
+    QUERY_HISTORY = _cache.get("history", [])
+except Exception:
+    GOOGLE_CACHE, QUERY_HISTORY = {}, []
+
+def _save_cache():
+    try:
+        CACHE_FILE.write_bytes(pickle.dumps({"cache": GOOGLE_CACHE,
+                                             "history": QUERY_HISTORY}))
+    except Exception:
+        pass
+
+def clear_google_cache():
+    GOOGLE_CACHE.clear()
+    QUERY_HISTORY.clear()
+    _save_cache()
+
 
 # доступные отраслевые группы
 GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
@@ -248,6 +271,9 @@ def _bad(u: str) -> bool: return any(b in u.lower() for b in _BAD)
 
 async def _google(sess, q, n=3):
     q = re.sub(r'[\"\'“”]', " ", q)[:80]
+    if (q, n) in GOOGLE_CACHE:
+        QUERY_HISTORY.append(q)
+        return GOOGLE_CACHE[(q, n)]
     params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
               "q": q, "num": n, "hl": "ru", "gl": "ru"}
     async with sess.get("https://www.googleapis.com/customsearch/v1",
@@ -256,8 +282,12 @@ async def _google(sess, q, n=3):
             logging.warning(f"Google error {r.status}")
             return []
         js = await r.json()
-        return [(i["link"], i.get("snippet", "")) for i in js.get("items", [])
-                if not _bad(i["link"])]
+        res = [(i["link"], i.get("snippet", "")) for i in js.get("items", [])
+               if not _bad(i["link"])]
+    GOOGLE_CACHE[(q, n)] = res
+    QUERY_HISTORY.append(q)
+    _save_cache()
+    return res
 
 
 
@@ -458,28 +488,17 @@ class RAG:
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
         if not hist:
-
             base_templates = [
-
-
-            base_templates = [
-
-            base_templates = [
-
-            templates = [
-
-
-
                 f'"{self.company}" описание',
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
-                f'"{self.company}" численность сотрудников',
+                f'"{self.company}" численность',
+
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" персонал',
                 f'"{self.company}" штат',
                 f'"{self.company}" производственные мощности',
                 f'"{self.company}" производственная мощность',
-                f'"{self.company}" производство',
                 f'"{self.company}" мощность завода',
                 f'"{self.company}" объём выпуска',
                 f'"{self.company}" производительность',
@@ -500,12 +519,14 @@ class RAG:
                 f'"{self.company}" инвестиции',
                 f'"{self.company}" расширение',
                 f'"{self.company}" адрес',
+
                 f'"{self.company}" история',
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
                 f'"{self.company}" конкуренты Россия',
                 f'"{self.company}" аналоги',
+
                 f'"{self.company}" competitors',
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
@@ -514,16 +535,6 @@ class RAG:
 
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
-
-
-            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
-            templates = base_templates + group_templates
-
-
-            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
-            templates = base_templates + group_templates
-
-
 
 
             ql = templates + [q for q in ql if q not in templates]
@@ -1251,6 +1262,13 @@ def run_ai_insight_tab() -> None:
 
     # ╭─🎛  UI ──────────────────────────────────────────╮
     st.title("📊 AI Company Insight")
+    if st.button("🗑️ Очистить кэш Google"):
+        clear_google_cache()
+        st.success("Кэш очищен")
+    if QUERY_HISTORY:
+        with st.expander("🕓 История запросов"):
+            for i, q in enumerate(QUERY_HISTORY[-50:], 1):
+                st.write(f"{i}. {q}")
     st.markdown("Введите данные (каждая компания — в отдельной строке).")
     
     c1, c2, c3, c4, c5 = st.columns(5)
