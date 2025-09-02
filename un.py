@@ -458,16 +458,28 @@ class RAG:
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
         if not hist:
+
             base_templates = [
+
+
+            base_templates = [
+
+            base_templates = [
+
+            templates = [
+
+
+
                 f'"{self.company}" описание',
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
-                f'"{self.company}" численность',
+                f'"{self.company}" численность сотрудников',
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" персонал',
                 f'"{self.company}" штат',
                 f'"{self.company}" производственные мощности',
                 f'"{self.company}" производственная мощность',
+                f'"{self.company}" производство',
                 f'"{self.company}" мощность завода',
                 f'"{self.company}" объём выпуска',
                 f'"{self.company}" производительность',
@@ -478,18 +490,42 @@ class RAG:
                 f'"{self.company}" адрес',
                 f'"{self.company}" офис',
                 f'"{self.company}" производство адрес',
+                f'"{self.company}" количество сотрудников',
+                f'"{self.company}" штат',
+                f'"{self.company}" headcount',
+                f'"{self.company}" мощность завода',
+                f'"{self.company}" производительность',
+                f'"{self.company}" capacity',
+                f'"{self.company}" производственные мощности',
+                f'"{self.company}" инвестиции',
+                f'"{self.company}" расширение',
+                f'"{self.company}" адрес',
                 f'"{self.company}" история',
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
                 f'"{self.company}" конкуренты',
                 f'"{self.company}" конкуренты Россия',
                 f'"{self.company}" аналоги',
+                f'"{self.company}" competitors',
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
+
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
+
+
+            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
+            templates = base_templates + group_templates
+
+
+            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
+            templates = base_templates + group_templates
+
+
+
+
             ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
