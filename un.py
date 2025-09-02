@@ -175,6 +175,7 @@ GROUP_SUMMARY_HINTS: dict[str, str] = {
 }
 
 
+
 # --- cache for Google queries ---
 CACHE_FILE = Path(".google_cache.pkl")
 try:
@@ -308,6 +309,7 @@ GROUP_SUMMARY_HINTS: dict[str, str] = {
         "релевантные операционные и крупные финансовые показатели"
     ),
 }
+
 
 
 # In[ ]:
@@ -630,6 +632,11 @@ class RAG:
                 f'"{self.company}" численность персонала',
                 f'"{self.company}" число работников',
 
+
+                f'"{self.company}" численность персонала',
+                f'"{self.company}" число работников',
+
+
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" персонал',
                 f'"{self.company}" штат',
@@ -637,6 +644,10 @@ class RAG:
                 f'"{self.company}" производственная мощность',
 
                 f'"{self.company}" производственная площадка',
+
+
+                f'"{self.company}" производственная площадка',
+
 
                 f'"{self.company}" мощность завода',
                 f'"{self.company}" объём выпуска',
@@ -648,6 +659,7 @@ class RAG:
                 f'"{self.company}" адрес',
                 f'"{self.company}" офис',
                 f'"{self.company}" производство адрес',
+
 
                 f'"{self.company}" количество сотрудников',
                 f'"{self.company}" штат',
@@ -661,6 +673,7 @@ class RAG:
                 f'"{self.company}" адрес',
 
 
+
                 f'"{self.company}" история',
                 f'"{self.company}" прибыль',
                 f'"{self.company}" объём производства',
@@ -669,12 +682,17 @@ class RAG:
                 f'"{self.company}" аналоги',
 
 
+
                 f'"{self.company}" competitors',
+
 
                 f'"{self.company}" рейтинг',
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
+
+            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
+
 
             group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
             templates = base_templates + group_templates
@@ -749,7 +767,11 @@ class RAG:
 
     # ---------- orchestrator -------------------------------------------
     async def _run_async(self):
+
+        # parallel: собираем сниппет и паспорт сайта
+
         # paralell: сниппет + детальный паспорт сайта
+
         site_ctx_task = asyncio.create_task(self._site_ctx())
         site_pass_task = (
             asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
