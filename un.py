@@ -881,8 +881,11 @@ class FastLeadersInterviews:
                     block += f"\n{p['bio']}"
                 if p.get("news"):
                     block += "\nНовости о владельцах:\n" + "\n".join(p["news"])
-                if p.get("photo"):
-                    block += f"\nФото: {p['photo']}"
+                photo = p.get("photo")
+                if photo:
+                    block += f"\nФото: {photo}"
+                else:
+                    block += "\nФото: изображение не найдено"
                 blocks.append(block)
             owners_block = "\n\n".join(blocks)
         else:
