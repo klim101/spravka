@@ -27,10 +27,12 @@ import asyncio, aiohttp, re, textwrap, nest_asyncio, openai, tiktoken
 from collections import defaultdict
 from urllib.parse import urlparse
 import tldextract, re, asyncio, aiohttp                      # если tldextract уже импортирован – эту строку можно короче
-from functools import partial  
+from functools import partial
 import threading
 import time
 import functools
+import pickle
+from pathlib import Path
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
     "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
@@ -40,6 +42,24 @@ KEYS = {
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
+
+CACHE_FILE = Path("google_cache.pkl")
+GOOGLE_CACHE: dict = {}
+QUERY_HISTORY: list = []
+
+def _save_cache():
+    try:
+        CACHE_FILE.write_bytes(pickle.dumps({"cache": GOOGLE_CACHE, "history": QUERY_HISTORY}))
+    except Exception:
+        pass
+
+def clear_google_cache():
+    GOOGLE_CACHE.clear()
+    QUERY_HISTORY.clear()
+    try:
+        CACHE_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 # In[ ]:
@@ -624,7 +644,7 @@ class FastMarketRAG:
             "8) КЛЮЧЕВЫЕ ТРЕНДЫ (технологии, спрос, регулирование и др.), "
             "9) БАРЬЕРЫ И ОГРАНИЧЕНИЯ (вход, логистика, нормативка), "
             "10) ВЫВОДЫ ПО ГОДУ (ключевые итоги и сдвиги). "
-            "11) итоговым абзацем выведи объемы рынка по годам которые фигурировали в прошлых абзацах"
+            "11) в конце выведи таблицу формата 'Год | Объём рынка' по всем упомянутым годам; таблица будет использована для построения графика без осей и подписей"
             "ВСЕ ФАКТЫ ДОЛЖНЫ БЫТЬ УНИКАЛЬНЫМИ, НЕ ПОВТОРЯТЬСЯ И ПОДТВЕРЖДЁННЫ РЕАЛЬНЫМИ ССЫЛКАМИ НА ИСТОЧНИКИ В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
             "НЕ ИСПОЛЬЗУЙ MARKDOWN, НЕ ПРИДУМЫВАЙ ФАКТЫ — ТОЛЬКО ДОКУМЕНТИРОВАННЫЕ ДАННЫЕ. "
             "всегда оставляй ссылки"
@@ -1365,6 +1385,33 @@ def run_ai_insight_tab() -> None:
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
+
+                        rows, chart_rows = [], []
+                        for line in mkt_res["summary"].splitlines():
+                            m = re.match(r"\s*(\d{4})\s*[|:-]\s*(.+)", line)
+                            if m:
+                                year, val = m.groups()
+                                rows.append((year, val.strip()))
+                                num = re.search(r"[\d,.]+", val.replace(" ", ""))
+                                if num:
+                                    chart_rows.append((year, float(num.group(0).replace(",", ".")), val.strip()))
+                        if rows:
+                            df_tbl = pd.DataFrame(rows, columns=["Год", "Объём рынка"])
+                            st.dataframe(df_tbl, use_container_width=True)
+                            if chart_rows:
+                                years = [r[0] for r in chart_rows]
+                                nums  = [r[1] for r in chart_rows]
+                                labels = [r[2] for r in chart_rows]
+                                fig, ax = plt.subplots(figsize=(6, 3))
+                                bars = ax.bar(years, nums)
+                                for b, lab in zip(bars, labels):
+                                    ax.annotate(lab, xy=(b.get_x()+b.get_width()/2, b.get_height()),
+                                                xytext=(0,3), textcoords="offset points",
+                                                ha="center", fontsize=8)
+                                ax.set_yticks([])
+                                for spine in ax.spines.values():
+                                    spine.set_visible(False)
+                                st.pyplot(fig)
                     
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
