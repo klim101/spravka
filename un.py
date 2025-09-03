@@ -1080,9 +1080,12 @@ def run_ai_insight_tab() -> None:
         rep = st.session_state["ai_report"]
     
         # --- выводим всё из session_state вместо повторного расчёта ---
-        st.markdown(rep["doc"]["summary_rendered_html"], unsafe_allow_html=True)
-        st.dataframe(rep["tbl"], use_container_width=True)
-        st.pyplot(rep["graphics"])
+        if rep.get("doc"):
+            st.markdown(rep["doc"]["summary_rendered_html"], unsafe_allow_html=True)
+        if rep.get("tbl") is not None:
+            st.dataframe(rep["tbl"], use_container_width=True)
+        if rep.get("graphics"):
+            st.pyplot(rep["graphics"])
         # и т.д.
     
         # кнопка «Сбросить и построить заново»
@@ -1107,7 +1110,15 @@ def run_ai_insight_tab() -> None:
     with c4: sites_raw = st.text_area("Сайт")
     
     aggregate_mode = st.checkbox("🧮 Суммировать финансы по всем ИНН")
-    
+    blocks = st.multiselect(
+        "Выберите блоки отчёта",
+        ["Описание компании", "Рыночный отчёт", "Руководители и интервью"],
+        default=["Описание компании", "Рыночный отчёт", "Руководители и интервью"],
+    )
+    gen_doc = "Описание компании" in blocks
+    gen_market = "Рыночный отчёт" in blocks
+    gen_leads = "Руководители и интервью" in blocks
+
     if st.button("🔍 Построить отчёт", key="ai_build"):
         with st.spinner("Считаем отчёт…"):
 
@@ -1149,8 +1160,10 @@ def run_ai_insight_tab() -> None:
             sites_full = pad(sites)
             YEARS = ["2022", "2023", "2024"]
             df_companies = pd.DataFrame([ck_company(i) for i in inns])
+            doc = None
+            mkt_res = None
+            lead_res = None
 
-            
             def parse_people_cell(cell) -> list[str]:
                 """
                 Принимает содержимое ячейки «Руковод» или «Учред_ФЛ»
@@ -1366,47 +1379,44 @@ def run_ai_insight_tab() -> None:
                     first_site = sites_full[0]
                     first_inn = inns[0] if inns else None
                     
-                    # --- единый RAG-пайплайн (Google-сниппеты + сайт) ---------------------
-                    st.subheader("📝 Описание компании")
-                    with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(first_name, website=first_site, market=first_mkt).run()
-                    
-                    # ----------- вывод основного отчёта -----------------------------------
-                    html_main = _linkify(doc["summary"]).replace("\n", "<br>")
-                    st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(doc["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        st.dataframe(
-                            pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
-                            use_container_width=True,
+                    if gen_doc:
+                        st.subheader("📝 Описание компании")
+                        with st.spinner("Генерируем описание компании…"):
+                            doc = RAG(first_name, website=first_site, market=first_mkt).run()
+
+                        html_main = _linkify(doc["summary"]).replace("\n", "<br>")
+                        st.markdown(
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
+                            unsafe_allow_html=True,
                         )
-                    
-                    # ----------- отдельная плашка «Паспорт сайта» (если есть) --------------
-                    if doc.get("site_pass"):
-                        with st.expander("🌐 Паспорт сайта"):
-                            st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>"
-                                f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
-                                unsafe_allow_html=True,
+
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(doc["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            st.dataframe(
+                                pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
+                                use_container_width=True,
                             )
-                    else:
-                        st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
+
+                        if doc.get("site_pass"):
+                            with st.expander("🌐 Паспорт сайта"):
+                                st.markdown(
+                                    f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                    f"border-radius:8px;padding:18px;line-height:1.55'>"
+                                    f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        else:
+                            st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
                     
-                    # ----------- Рыночный отчёт -------------------------------------------
-                    if first_mkt:
+                    if gen_market and first_mkt:
                         st.subheader("📈 Рыночный отчёт")
                         with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                             mkt_res = get_market_rag(first_mkt)
-                    
+
                         mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                         st.markdown(
                             f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
@@ -1436,55 +1446,54 @@ def run_ai_insight_tab() -> None:
                                     ax.annotate(lab, xy=(b.get_x()+b.get_width()/2, b.get_height()),
                                                 xytext=(0,3), textcoords="offset points",
                                                 ha="center", fontsize=8)
+                                    
                                 ax.set_yticks([])
                                 for spine in ax.spines.values():
                                     spine.set_visible(False)
                                 st.pyplot(fig)
-                    
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
-                    
+
                         with st.expander("🔍 Сниппеты (top-15)"):
                             st.dataframe(
                                 pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
                                 use_container_width=True,
                             )
                     
-                    # ----------- Руководители и интервью -----------------------------------
-                    st.subheader("👥 Руководители и интервью")
-                    with st.spinner("Собираем руководителей и интервью…"):
-                        # берём Checko-карточку первой компании из готового DataFrame
-                        company_info = df_companies.iloc[0].to_dict()
-                    
-                        lead_res = get_leaders_rag(
-                            first_name,
-                            website=first_site,
-                            market=first_mkt,
-                            company_info=company_info,      # ← передаём dict с leaders_raw / founders_raw
-                        )
-                    
-                    st.markdown(
-                        f"<div style='background:#F9FAFB;border:1px solid #ddd;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>"
-                        f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(lead_res["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        if lead_res["snippets"]:
-                            df = (
-                                pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
-                                .drop_duplicates(subset="URL")
-                                .head(15)
+                    if gen_leads:
+                        st.subheader("👥 Руководители и интервью")
+                        with st.spinner("Собираем руководителей и интервью…"):
+                            company_info = df_companies.iloc[0].to_dict()
+                            lead_res = get_leaders_rag(
+                                first_name,
+                                website=first_site,
+                                market=first_mkt,
+                                company_info=company_info,
                             )
-                            st.dataframe(df, use_container_width=True)
-                        else:
-                            st.info("Сниппеты не найдены.")
+
+                        st.markdown(
+                            f"<div style='background:#F9FAFB;border:1px solid #ddd;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>"
+                            f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(lead_res["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            if lead_res["snippets"]:
+                                df = (
+                                    pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
+                                    .drop_duplicates(subset="URL")
+                                    .head(15)
+                                )
+                                st.dataframe(df, use_container_width=True)
+                            else:
+                                st.info("Сниппеты не найдены.")
                     
                     # ─────── конец блока, дальше ваш код (если был) ───────────────────────
             
@@ -1605,113 +1614,105 @@ def run_ai_insight_tab() -> None:
             
                     
                     
-                    # ────── Описание компании (Google + сайт) ───────────────────────────
-                    st.subheader("📝 Описание компании")
-                    with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(name, website=site, market=mkt).run()     # ← новая переменная
-                    
-                    # основной отчёт
-                    main_html = _linkify(doc["summary"]).replace("\n", "<br>")
-                    st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>{main_html}</div>",
-                        unsafe_allow_html=True
-                    )
-                    
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(doc["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        st.dataframe(
-                            pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
-                            use_container_width=True,
+                    if gen_doc:
+                        st.subheader("📝 Описание компании")
+                        with st.spinner("Генерируем описание компании…"):
+                            doc = RAG(name, website=site, market=mkt).run()
+
+                        main_html = _linkify(doc["summary"]).replace("\n", "<br>")
+                        st.markdown(
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{main_html}</div>",
+                            unsafe_allow_html=True
                         )
-                    
-                    # 🌐 Паспорт сайта (если получился)
-                    if doc.get("site_pass"):
-                        with st.expander("🌐 Паспорт сайта"):
-                            st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>"
-                                f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
-                                unsafe_allow_html=True,
+
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(doc["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            st.dataframe(
+                                pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
+                                use_container_width=True,
                             )
-                    else:
-                        st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
+
+                        if doc.get("site_pass"):
+                            with st.expander("🌐 Паспорт сайта"):
+                                st.markdown(
+                                    f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                    f"border-radius:8px;padding:18px;line-height:1.55'>"
+                                    f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        else:
+                            st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
                     
-                    # ────── Рыночный отчёт ───────────────────────────────────────────────
-                    if mkt:
+                    if gen_market and mkt:
                         st.subheader("📈 Рыночный отчёт")
                         with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                             mkt_res = get_market_rag(mkt)
-                    
+
                         mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                         st.markdown(
                             f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-                    
+
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
-                    
+
                         with st.expander("🔍 Сниппеты (top-15)"):
                             st.dataframe(
                                 pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
                                 use_container_width=True,
                             )
                     
-                    # ────── Руководители и интервью ─────────────────────────────────────
-                    st.subheader("👥 Руководители и интервью")
-                    with st.spinner("Собираем руководителей и интервью…"):
-                    
-                        # ① берём сырые списки руководителей / учредителей из готового df_companies
-                        company_info = {
-                            "leaders_raw":  df_companies.loc[idx, "leaders_raw"]  or [],
-                            "founders_raw": df_companies.loc[idx, "founders_raw"] or [],
-                        }
-                    
-                        # ② запускаем пайплайн
-                        lead_res = get_leaders_rag(
-                            name,
-                            website=site,
-                            market=mkt,
-                            company_info=company_info,   # ← только нужные ключи
-                        )
-                    
-                    # вывод
-                    st.markdown(
-                        f"<div style='background:#F9FAFB;border:1px solid #ddd;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>"
-                        f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(lead_res["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        if lead_res["snippets"]:
-                            df = (
-                                pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
-                                .drop_duplicates(subset="URL")
-                                .head(15)
+                    if gen_leads:
+                        st.subheader("👥 Руководители и интервью")
+                        with st.spinner("Собираем руководителей и интервью…"):
+                            company_info = {
+                                "leaders_raw":  df_companies.loc[idx, "leaders_raw"]  or [],
+                                "founders_raw": df_companies.loc[idx, "founders_raw"] or [],
+                            }
+                            lead_res = get_leaders_rag(
+                                name,
+                                website=site,
+                                market=mkt,
+                                company_info=company_info,
                             )
-                            st.dataframe(df, use_container_width=True)
-                        else:
-                            st.info("Сниппеты не найдены.")
 
-        st.session_state["ai_report"] = {
-            "doc":          doc,          # описание компании
-            "mkt_res":      mkt_res,      # рыночный отчёт
-            "lead_res":     lead_res,     # руководители/интервью
-            "tbl":          tbl,          # фин. таблица DataFrame
-            "graphics":     fig,          # объект matplotlib (если нужен повторный рендер)
-            # … что-угодно ещё
-        }
+                        st.markdown(
+                            f"<div style='background:#F9FAFB;border:1px solid #ddd;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>"
+                            f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(lead_res["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            if lead_res["snippets"]:
+                                df = (
+                                    pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
+                                    .drop_duplicates(subset="URL")
+                                    .head(15)
+                                )
+                                st.dataframe(df, use_container_width=True)
+                            else:
+                                st.info("Сниппеты не найдены.")
+
+        report = {"tbl": tbl, "graphics": fig}
+        if doc is not None:
+            report["doc"] = doc
+        if mkt_res is not None:
+            report["mkt_res"] = mkt_res
+        if lead_res is not None:
+            report["lead_res"] = lead_res
+        st.session_state["ai_report"] = report
         st.session_state["ai_result_ready"] = True
 
 def long_job(total_sec: int = 180, key_prog: str = "ai_prog"):
