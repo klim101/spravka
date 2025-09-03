@@ -1,193 +1,114 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[6]:
+
+
+# Устанавливаем API-ключ OpenAI
 import os
-import re
-import html
-import json
-import time
-import pickle
-import logging
-import asyncio
-import threading
-import functools
-from pathlib import Path
-from typing import List, Dict, Any, Tuple, Callable
-
 import requests
-import aiohttp
-import nest_asyncio
 import pandas as pd
+import re
 import numpy as np
-import streamlit as st
-import tldextract
+import requests
+from bs4 import BeautifulSoup
 import openai
-# tiktoken / BeautifulSoup опциональны; оставляем импорт на будущее
-# import tiktoken
-# from bs4 import BeautifulSoup
-
-nest_asyncio.apply()
-logging.basicConfig(level=logging.WARNING)
-
-# Секреты из Streamlit
+from typing import List, Dict, Any, Tuple
+import json
+import streamlit as st
+from collections import defaultdict
+import asyncio, aiohttp, re, textwrap, nest_asyncio, openai, tiktoken
+from collections import defaultdict
+from urllib.parse import urlparse
+import tldextract, re, asyncio, aiohttp                      # если tldextract уже импортирован – эту строку можно короче
+from functools import partial  
+import threading
+import time
+import functools
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
     "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
     "GOOGLE_CX":      st.secrets["GOOGLE_CX"],
     "CHECKO_API_KEY": st.secrets["CHECKO_API_KEY"],
-    "DYXLESS_TOKEN":  st.secrets["DYXLESS_TOKEN"],
+    "DYXLESS_TOKEN": st.secrets["DYXLESS_TOKEN"]
 }
-openai.api_key = KEYS["OPENAI_API_KEY"]
+
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 
-# Кэш Google
-CACHE_FILE = Path(".google_cache.pkl")
-try:
-    _cache = pickle.loads(CACHE_FILE.read_bytes())
-    GOOGLE_CACHE: dict = _cache.get("cache", {})
-    QUERY_HISTORY: list = _cache.get("history", [])
-except Exception:
-    GOOGLE_CACHE, QUERY_HISTORY = {}, []
 
-def _save_cache():
-    try:
-        CACHE_FILE.write_bytes(pickle.dumps({"cache": GOOGLE_CACHE,
-                                             "history": QUERY_HISTORY}))
-    except Exception:
-        pass
+# In[ ]:
 
-def clear_google_cache():
-    GOOGLE_CACHE.clear()
-    QUERY_HISTORY.clear()
-    _save_cache()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Отрасли и подсказки
-# ──────────────────────────────────────────────────────────────────────────────
-GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
-          "Logistics", "FIG", "Services", "Agro", "TMT"]
+# ─────────────────── app.py ────────────────────
+import os, re, asyncio, aiohttp, requests, nest_asyncio, logging
+import streamlit as st
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
 
-GROUP_QUERY_TEMPLATES: dict[str, list[Callable[[str], str]]] = {
-    "Industrials": [
-        lambda c: f'"{c}" объём производства',
-        lambda c: f'"{c}" производственная мощность',
-        lambda c: f'"{c}" фабрика',
-        lambda c: f'"{c}" логистика',
-        lambda c: f'"{c}" оборудование',
-        lambda c: f'"{c}" r&d',
-        lambda c: f'"{c}" патенты',
-        lambda c: f'"{c}" сертификат ISO',
-        lambda c: f'"{c}" список оборудования',
-        lambda c: f'"{c}" виды продукции',
-    ],
-    "Consumer": [
-        lambda c: f'"{c}" бренды',
-        lambda c: f'"{c}" логотип',
-        lambda c: f'"{c}" целевая аудитория',
-    ],
-    "O&G": [
-        lambda c: f'"{c}" объём добычи',
-        lambda c: f'"{c}" переработка',
-        lambda c: f'"{c}" запасы',
-    ],
-    "M&M": [
-        lambda c: f'"{c}" объём добычи',
-        lambda c: f'"{c}" запасы',
-    ],
-    "Retail": [
-        lambda c: f'"{c}" количество магазинов',
-        lambda c: f'"{c}" площадь магазинов',
-        lambda c: f'"{c}" квадратные метры',
-    ],
-    "Logistics": [
-        lambda c: f'"{c}" парк',
-        lambda c: f'"{c}" объём грузов',
-        lambda c: f'"{c}" объём пассажиров',
-    ],
-    "FIG": [
-        lambda c: f'"{c}" баланс',
-        lambda c: f'"{c}" чистые активы',
-        lambda c: f'"{c}" процентный доход',
-        lambda c: f'"{c}" комиссионный доход',
-        lambda c: f'"{c}" доход от страхования',
-    ],
-    "Services": [
-        lambda c: f'"{c}" gmv услуг',
-        lambda c: f'"{c}" проникновение',
-    ],
-    "Agro": [
-        lambda c: f'"{c}" площадь земли',
-        lambda c: f'"{c}" регион',
-        lambda c: f'"{c}" культуры',
-        lambda c: f'"{c}" животные',
-        lambda c: f'"{c}" объём производства',
-        lambda c: f'"{c}" склады',
-        lambda c: f'"{c}" элеваторы',
-    ],
-    "TMT": [
-        lambda c: f'"{c}" количество пользователей',
-        lambda c: f'"{c}" ежедневные просмотры',
-        lambda c: f'"{c}" проникновение',
-        lambda c: f'"{c}" операционные показатели',
-        lambda c: f'"{c}" gmv',
-        lambda c: f'"{c}" gbv',
-        lambda c: f'"{c}" количество просмотров',
-    ],
-}
+nest_asyncio.apply()
+logging.basicConfig(level=logging.WARNING)
+import os, re, html, textwrap, asyncio, logging, nest_asyncio
+import aiohttp, requests, streamlit as st
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+import tldextract, openai
 
-GROUP_SUMMARY_HINTS: dict[str, str] = {
-    "Industrials": (
-        "учитывай объём производства и capacity, расположение фабрики, "
-        "логистику, описание оборудования, наличие R&D и патентов, "
-        "сертификаты ISO, список оборудования с характеристиками и виды продукции"
-    ),
-    "Consumer": "добавляй описание брендов с логотипами и целевую аудиторию",
-    "O&G": "указывай объём добычи, переработки, запасы и ресурсы",
-    "M&M": "указывай объём добычи, запасы и ресурсы",
-    "Retail": "приводи количество и площадь магазинов, общую площадь в кв. метрах",
-    "Logistics": "описывай парк и объёмы грузов или пассажиров",
-    "FIG": (
-        "добавляй баланс, чистые активы, процентный и комиссионный доход, "
-        "доход от страхования и прочих финансовых продуктов"
-    ),
-    "Services": "указывай GMV услуг и уровень проникновения",
-    "Agro": (
-        "описывай объём земли и регион, выращиваемые культуры или животных, "
-        "объёмы производства, наличие складов и элеваторов"
-    ),
-    "TMT": (
-        "приводи количество пользователей, ежедневные просмотры, проникновение, "
-        "релевантные операционные и крупные финансовые показатели"
-    ),
-}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UI helpers
-# ──────────────────────────────────────────────────────────────────────────────
+import html, re
+
 _URL_PAT = re.compile(r"https?://[^\s)]+", flags=re.I)
+
 def _linkify(text) -> str:
-    if not isinstance(text, str):
+    """Безопасно превращает URL в <a …>ссылка</a>."""
+    if not isinstance(text, str):                      # << главное
         text = "" if text is None else str(text)
+
     def repl(m):
         u = html.escape(m.group(0))
         return f'<a href="{u}" target="_blank">ссылка</a>'
     return _URL_PAT.sub(repl, text)
 
-def long_job(total: int, key: str):
-    for i in range(total + 1):
-        time.sleep(1)
-        st.session_state[key] = i / total
-    st.session_state[key] = 1.0
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Dyxless (как было)
-# ──────────────────────────────────────────────────────────────────────────────
+
+def long_job(total: int, key: str):
+    """Долгая задача: пишет прогресс в st.session_state[key]"""
+    for i in range(total + 1):
+        time.sleep(1)                         # здесь ваша тяжёлая логика
+        st.session_state[key] = i / total     # от 0.0 до 1.0
+    st.session_state[key] = 1.0               # финализируем
+
+
+
+# ── helpers ────────────────────────────────────────────────
+async def _site_snippet(domain: str) -> str:
+    """Возвращает первый Google-сниппет для site:domain (или '')."""
+    if not domain:
+        return ""
+    async with aiohttp.ClientSession() as sess:
+        q = f"site:{domain}"
+        snips = await _google(sess, q, n=1)
+    return snips[0][1] if snips else ""
+
+
+
 @st.cache_data(ttl=3_600, show_spinner=False)
 def dyxless_query(query: str,
                   token: str,
                   max_rows: int = 20_000) -> Dict[str, Any]:
+    """
+    Обёртка Dyxless. Если записей > max_rows – возвращаем только max_rows,
+    дополнительно пишем truncated=True и original_counts.
+    """
     url = "https://api-dyxless.cfd/query"
     try:
         r = requests.post(url, json={"query": query, "token": token}, timeout=15)
         r.raise_for_status()
         res = r.json()
+
         if res.get("status") and isinstance(res.get("data"), list):
             full = len(res["data"])
             if full > max_rows:
@@ -197,107 +118,76 @@ def dyxless_query(query: str,
     except requests.RequestException as e:
         return {"status": False, "error": str(e)}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Google Search helpers (правки: PDF разрешён, лимит q=128, кэш, rerank)
-# ──────────────────────────────────────────────────────────────────────────────
-# НЕ баним PDF (важные источники). Баним соцсети/картинки.
-_BAD = ("vk.com", "facebook.", ".jpg", ".png")
+
+
+
+
+
+
+
+
+
+
+
+# ╭─🔧  вспомогалки ───────────────────────────────╮
+_BAD = ("vk.com", "facebook.", ".pdf", ".jpg", ".png")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Win64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
+def _bad(u: str) -> bool: return any(b in u.lower() for b in _BAD)
 
-def _bad(u: str) -> bool:
-    return any(b in u.lower() for b in _BAD)
+async def _google(sess, q, n=3):
+    q = re.sub(r'[\"\'“”]', " ", q)[:80]
+    params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
+              "q": q, "num": n, "hl": "ru", "gl": "ru"}
+    async with sess.get("https://www.googleapis.com/customsearch/v1",
+                         params=params, headers=HEADERS, timeout=8) as r:
+        if r.status != 200:
+            logging.warning(f"Google error {r.status}")
+            return []
+        js = await r.json()
+        return [(i["link"], i.get("snippet", "")) for i in js.get("items", [])
+                if not _bad(i["link"])]
 
-def unique(seq):
-    seen = set()
-    out = []
-    for x in seq:
-        k = x.strip().lower()
-        if k and k not in seen:
-            seen.add(k); out.append(x.strip())
-    return out
 
-# «сигналы мощности» для rerank
-POWER_SIGNALS = [
-    r"\bт/сут\b", r"\bтонн[аы] в сутки\b", r"\bт/год\b", r"\bтонн[аы] в год\b",
-    r"\bмощн\w+\b", r"\bcapacity\b", r"\bм²\b", r"\bкв\.?\s*м\b",
-    r"\bISO\s*9\d{2,}\b", r"\bMW\b|\bМВт\b|\bGWh\b",
-]
-_SIG = [re.compile(p, flags=re.I) for p in POWER_SIGNALS]
 
-def score_snip(url: str, txt: str) -> int:
-    s = 0
-    for rgx in _SIG:
-        if rgx.search(url) or rgx.search(txt):
-            s += 1
-    if url.lower().endswith(".pdf"): s += 1
-    if re.search(r"\.(gov|edu)\b", url.lower()): s += 1
-    return s
 
-def rerank_snippets(snips: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    seen, uniq_snips = set(), []
-    for u, t in snips:
-        if u not in seen:
-            seen.add(u)
-            uniq_snips.append((u, t))
-    return sorted(uniq_snips, key=lambda x: score_snip(*x), reverse=True)
 
-async def _google(sess: aiohttp.ClientSession, q: str, n: int = 3):
-    q = re.sub(r'[\"\'“”]', " ", q)[:128]
-    cache_key = (q, n)
-    if cache_key in GOOGLE_CACHE:
-        QUERY_HISTORY.append(q); return GOOGLE_CACHE[cache_key]
 
-    params = {
-        "key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
-        "q": q, "num": n, "hl": "ru", "gl": "ru"
-    }
-    try:
-        async with sess.get("https://www.googleapis.com/customsearch/v1",
-                            params=params, headers=HEADERS, timeout=8) as r:
-            if r.status != 200:
-                logging.warning(f"Google error {r.status}")
-                return []
-            js = await r.json()
-            res = [(it["link"], it.get("snippet", "")) for it in js.get("items", []) if not _bad(it["link"])]
-    except asyncio.TimeoutError:
-        logging.warning("[Google] timeout")
-        res = []
-
-    GOOGLE_CACHE[cache_key] = res
-    QUERY_HISTORY.append(q)
-    _save_cache()
-    return res
-
-# ──────────────────────────────────────────────────────────────────────────────
-# OpenAI helpers
-# ──────────────────────────────────────────────────────────────────────────────
-async def _gpt(messages, *, model="gpt-4o-mini", T=0.2) -> str:
-    chat = await openai.ChatCompletion.acreate(model=model, temperature=T, messages=messages)
+async def _gpt(messages, *, model="gpt-4o-mini", T=0.2):
+    """Асинхронный вызов OpenAI ChatCompletion → str."""
+    chat = await openai.ChatCompletion.acreate(
+        model=model, temperature=T, messages=messages)
     return chat.choices[0].message.content.strip()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SiteRAG (как было, без лишних дублей)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────── основная обёртка (в стиле вашего RAG) ────────────────────────────
 class SiteRAG:
-    def __init__(self, url: str, *, model="gpt-4o-mini", max_chunk: int = 6_000, T: float = 0.18):
-        if url and not url.startswith(("http://", "https://")):
+    """
+    url        – адрес сайта (можно без http/https)
+    max_chunk  – максимальная длина одного куска HTML, который уйдёт LLM
+    summary    – итоговый подробный паспорт компании
+    chunks_out – список промежуточных резюме c каждой части HTML
+    html_size  – размер исходного HTML-файла, bytes
+    """
+    def __init__(self, url: str, *, model="gpt-4o-mini",
+                 max_chunk: int = 6_000, T: float = 0.18):
+        if not url.startswith(("http://", "https://")):
             url = "http://" + url
         self.url       = url
         self.model     = model
         self.max_chunk = max_chunk
         self.T         = T
 
+    # ---------- 1. скачиваем HTML ------------------------------------------------
     async def _fetch(self) -> str:
-        if not self.url:
-            raise RuntimeError("URL is empty")
         h = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession(headers=h) as sess:
             async with sess.get(self.url, timeout=20) as r:
-                if r.status == 200 and "text/html" in (r.headers.get("Content-Type", "")):
+                if r.status == 200 and "text/html" in r.headers.get("Content-Type", ""):
                     return await r.text("utf-8", errors="ignore")
                 raise RuntimeError(f"Не удалось скачать {self.url} (status={r.status})")
 
+    # ---------- 2. делим HTML на «безопасные» куски -----------------------------
     def _split(self, html_raw: str) -> list[str]:
+        # пробуем резать по крупным тегам, чтобы куски были связны
         body = re.split(r"</?(?:body|div|section|article)[^>]*>", html_raw, flags=re.I)
         chunks, buf = [], ""
         for part in body:
@@ -309,124 +199,87 @@ class SiteRAG:
             chunks.append(buf)
         return chunks
 
+    # ---------- 3. map-фаза: конспектируем каждый кусок -------------------------
     async def _summarise_chunk(self, n: int, total: int, chunk: str) -> str:
         sys = (
-            "Ты – профессиональный аналитик. Прочитай HTML-фрагмент и выпиши ВСЕ значимые факты "
-            "(продукты, услуги, история, география, клиенты, цифры, команда, контакты и пр.). "
-            "Игнорируй навигацию/footer/скрипты. Пиши кратко, абзацами."
+            "Ты – профессиональный аналитик. Прочитай данный HTML-фрагмент и "
+            "выпиши ВСЕ значимые факты о компании (продукты, услуги, история, "
+            "география, клиенты, цифры, команда, контакты и пр.). "
+            "Удали навигацию/footer/скрипты. Сохрани структуру абзацами."
         )
-        return await _gpt(
-            [{"role": "system", "content": sys},
-             {"role": "user", "content": f"HTML_CHUNK_{n}/{total} (len={len(chunk):,}):\n{chunk}"}],
-            model=self.model, T=self.T
-        )
+        return await _gpt([
+            {"role": "system", "content": sys},
+            {"role": "user",
+             "content": f"HTML_CHUNK_{n}/{total} (len={len(chunk):,}):\n{chunk}"}],
+            model=self.model, T=self.T)
 
+    # ---------- 4. reduce-фаза: делаем финальный паспорт ------------------------
     async def _summarise_overall(self, parts: list[str]) -> str:
         sys = (
-            "Ниже конспекты частей сайта. На их основе составь один ПОЛНЫЙ и связный паспорт компании: "
-            "кто они; продукты/услуги; рынок и клиенты; история и ключевые события; география и масштабы; "
-            "руководители/команда; любые цифры и факты; вывод о позиции и перспективах."
+            "Ниже уже подготовленные конспекты разных частей сайта. "
+            "На их основе составь один ПОЛНЫЙ и связный паспорт компании: "
+            "• кто они и чем занимаются; • продукты / услуги; • рынок и клиенты; "
+            "• история и ключевые события; • география и масштабы; "
+            "• руководители / команда; • любые цифры и факты; "
+            "• вывод о позиции и перспективах. Ничего важного не упусти."
         )
         merged = "\n\n".join(parts)
-        return await _gpt(
-            [{"role": "system", "content": sys},
-             {"role": "user", "content": merged}],
-            model=self.model, T=self.T
-        )
+        return await _gpt([
+            {"role": "system", "content": sys},
+            {"role": "user",   "content": merged}],
+            model=self.model, T=self.T)
 
+    # ---------- orchestrator ----------------------------------------------------
     async def _run_async(self):
         html_raw = await self._fetch()
         chunks   = self._split(html_raw)
+
+        # map
         part_summaries = []
         for idx, ch in enumerate(chunks, 1):
+            print(f"→ LLM chunk {idx}/{len(chunks)} …")
             part_summaries.append(await self._summarise_chunk(idx, len(chunks), ch))
-        summary_final = await self._summarise_overall(part_summaries)
-        return {"summary": summary_final, "chunks_out": part_summaries,
-                "html_size": f"{len(html_raw):,} bytes", "url": self.url}
 
+        # reduce
+        summary_final = await self._summarise_overall(part_summaries)
+
+        return {"summary":    summary_final,
+                "chunks_out": part_summaries,
+                "html_size":  f"{len(html_raw):,} bytes",
+                "url":        self.url}
+
+    # ---------- публичный синхронный интерфейс ----------------------------------
     def run(self) -> dict:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop and loop.is_running():
-                return loop.run_until_complete(self._run_async())
-        except RuntimeError:
-            pass
+        loop = asyncio.get_event_loop()
+        if loop and loop.is_running():
+            return loop.run_until_complete(self._run_async())
         return asyncio.run(self._run_async())
 
+
+
+
+# ---------- helper: синхронно достаём паспорт сайта -----------------
 def _site_passport_sync(url: str, *, max_chunk: int = 6_000) -> str:
-    if not url:
-        return ""
+    """Вызывает SiteRAG(url).run() и возвращает только summary."""
     try:
         return SiteRAG(url, max_chunk=max_chunk).run()["summary"]
     except Exception as exc:
         return f"[site passport error: {exc}]"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Шаблоны запросов (новые детерминированные)
-# ──────────────────────────────────────────────────────────────────────────────
-def BASE_TEMPLATES(C: str) -> list[str]:
-    return unique([
-        f'"{C}" описание',
-        f'"{C}" бренды',
-        f'"{C}" численность',
-        f'"{C}" количество сотрудников',
-        f'"{C}" производственные мощности',
-        f'"{C}" мощность завода',
-        f'"{C}" производственная площадка',
-        f'"{C}" объём выпуска',
-        f'"{C}" производительность',
-        f'"{C}" инвестиции',
-        f'"{C}" расширение',
-        f'"{C}" строительство завода',
-        f'"{C}" адрес',
-        f'"{C}" офис',
-        f'"{C}" история',
-        f'"{C}" прибыль',
-        f'"{C}" объём производства',
-        f'"{C}" конкуренты',
-        f'"{C}" рейтинг',
-        f'форум "{C}"',
-        f'site:news.* "{C}"',
-        f'"{C}" filetype:pdf',
-        f'"{C}" презентация filetype:pdf',
-        f'"{C}" тендер filetype:pdf',
-    ])
 
-def SOCIAL_TEMPLATES(C: str, dom: str) -> list[str]:
-    base = [f'"{C}" site:{s}' for s in ["vk.com","facebook.com","linkedin.com","youtube.com","ok.ru"]]
-    if dom:
-        base.append(f'"{C}" site:{dom}')
-    base += [f'"{C}" сайт', f'"{C}" linkedin', f'"{C}" youtube', f'"{C}" вк']
-    return unique(base)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# RAG (переписан: генерация запросов, rerank, 2-шаговый summary)
-# ──────────────────────────────────────────────────────────────────────────────
 class RAG:
     """
-    summary     – финальный отчёт (Google-сниппеты + паспорт сайта)
-    queries     – список всех запросов
-    snippets    – [(url, snippet)] после rerank и dedup
-    news_snips  – сниппеты с крупных новостных сайтов
-    site_ctx    – короткий сниппет «site:<домен> …»
-    site_pass   – паспорт сайта
+    summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
+    queries    – запросы, которые LLM сгенерировала для Google
+    snippets   – список (url, text) из Google
+    site_ctx   – короткий сниппет «site:<домен> …»
+    site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
     """
-    def __init__(
-        self,
-        company: str,
-        *,
-        website: str = "",
-        market: str = "",
-        years=(2022, 2023, 2024),
-        country: str = "Россия",
-        steps: int = 2,
-        snips: int = 4,
-        llm_model: str = "gpt-4o-mini",
-        facts_model: str = "gpt-4o",         # можно указать более сильную модель
-        render_model: str = "gpt-4o-mini",
-        company_info: dict | None = None,
-        group: str = "",
-    ):
+    def __init__(self, company: str, *, website: str = "", market: str = "",
+                 years=(2022, 2023, 2024), country: str = "Россия",
+                 steps: int = 3, snips: int = 4,
+                 llm_model: str = "gpt-4o-mini",company_info: dict | None = None,):
         self.company   = company.strip()
         self.website   = website.strip()
         self.market    = market.strip()
@@ -435,99 +288,94 @@ class RAG:
         self.steps     = steps
         self.snips     = snips
         self.llm_model = llm_model
-        self.facts_model = facts_model or llm_model
-        self.render_model = render_model or llm_model
         self.company_info = company_info or {}
-        self.group = group.strip()
 
-    # ── контекст «site:домен»
+    # ---------- site-snippet из Google ---------------------------------
     async def _site_ctx(self) -> str:
         dom = tldextract.extract(self.website).registered_domain if self.website else ""
-        if not dom:
-            return f"рынок компании – {self.market}" if self.market else ""
-        async with aiohttp.ClientSession() as sess:
-            snips = await _google(sess, f"site:{dom}", n=1)
-            base = snips[0][1] if snips else ""
-        if base and self.market:
-            return f"{base}\nрынок компании – {self.market}"
-        return base or (f"рынок компании – {self.market}" if self.market else "")
+        snip = await _site_snippet(dom)
+        if snip:
+            return f"{snip}\nрынок компании – {self.market}" if self.market else snip
+        return f"рынок компании – {self.market}" if self.market else ""
 
-    # ── генерация запросов (детерминированное ядро + 10 LLM-запросов)
-    async def _queries(self) -> list[str]:
-        dom = tldextract.extract(self.website).registered_domain if self.website else ""
-        C = self.company
-
-        seeds = BASE_TEMPLATES(C)
-        if self.group:
-            seeds += [tpl(C) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
-        seeds = unique(seeds)
-
-        extras = SOCIAL_TEMPLATES(C, dom)
-        ql = unique(seeds + extras)
-
-        sys = (
-            "Дай 10 доп. Google-запросов на русском для компании "
-            f"«{C}» (каждый должен содержать название компании), "
-            "упор на мощности/объёмы/адреса/инвестпроекты. "
-            "Используй site:, intitle:, inurl:, filetype:pdf, OR. "
-            "Формат: QUERY: <строка>. Ничего больше."
+    # ---------- GPT → поисковые запросы --------------------------------
+    async def _queries(self, hist="") -> list[str]:
+        dom  = tldextract.extract(self.website).registered_domain if self.website else ""
+        base = f'"{self.company}"' + (f' OR site:{dom}' if dom else "")
+        sys  = (
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 20 ТОЧНЫХ GOOGLE-ЗАПРОСОВ, "
+            f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
+            f"({self.country}, {', '.join(map(str, self.years))}).\n"
+            "### ОБЯЗАТЕЛЬНЫЕ БЛОКИ\n"
+            "1. ОПИСАНИЕ КОМПАНИИ И БРЕНДЫ.\n"
+            "2. ЧИСЛЕННОСТЬ СОТРУДНИКОВ.\n"
+            "3. ПРОИЗВОДСТВЕННЫЕ МОЩНОСТИ.\n"
+            "4. ИНВЕСТИЦИИ И РАСШИРЕНИЯ.\n"
+            "5. АДРЕСА ШТАБ-КВАРТИРЫ И ПРОИЗВОДСТВ.\n"
+            "6. СОЦИАЛЬНЫЕ СЕТИ.\n"
+            "7. ИСТОРИЯ.\n"
+            "8. ПРИБЫЛЬ И ОБЪЁМЫ ПРОДУКЦИИ.\n"
+            "9. КОНКУРЕНТЫ (НАЗВАНИЕ И САЙТ).\n"
+            "10. УПОМИНАНИЯ НА ФОРУМАХ И В РЕЙТИНГАХ.\n"
+            "ДЛЯ КАЖДОГО БЛОКА СДЕЛАЙ МИНИМУМ ПО ОДНОМУ ЗАПРОСУ НА РУССКОМ И ОДНОМ НА АНГЛИЙСКОМ.\n"
+            "### СОВЕТЫ ПО КОНСТРУКЦИИ ЗАПРОСОВ\n"
+            "- ИСПОЛЬЗУЙ ОПЕРАТОРЫ: `site:`, `intitle:`, `inurl:`, `filetype:pdf`, `OR`.\n"
+            "- ДОБАВЛЯЙ ГОДЫ И НАЗВАНИЯ ПРОДУКТОВ И БРЕНДОВ, ЕСЛИ НУЖНО.\n"
+            f"- ДЛЯ ОФИЦИАЛЬНЫХ ДАННЫХ ПРИМЕНЯЙ `site:{dom}` ИЛИ САЙТЫ РЕГУЛЯТОРОВ.\n"
+            "### ПРАВИЛА\n"
+            "- НЕ ДУБЛИРУЙ ЗАПРОСЫ.\n"
+            "- НЕ ДОБАВЛЯЙ КОММЕНТАРИИ, НУМЕРАЦИЮ И ЭМОДЗИ.\n"
+            "- ВЫВОДИ ТОЛЬКО СТРОКИ В ВИДЕ `QUERY: ...`.\n"
+            "### CHAIN OF THOUGHTS (ВНУТРЕННЕ, НЕ ВЫВОДИТЬ)\n"
+            "1. ПОНЯТЬ задачу.\n"
+            "2. СФОРМИРОВАТЬ информационные пробелы.\n"
+            "3. СГЕНЕРИРОВАТЬ ключевые термины.\n"
+            "4. СКОМБИНИРОВАТЬ их с операторами.\n"
+            "5. ВЫВЕСТИ строки `QUERY:`.\n"
         )
         raw = await _gpt(
             [{"role": "system", "content": sys},
-             {"role": "user", "content": ""}],
-            model=self.llm_model, T=0.05
-        )
-        llm_q = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
+             {"role": "user",   "content": f'base={base}{hist}'}],
+            model=self.llm_model, T=0.1)
+        ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
-        def add_market(q: str) -> str:
-            if self.market and self.market.lower() not in q.lower():
-                return f'{q} "{self.market}"'
-            return q
+        # ─── целевые соцсети и официальный сайт ──────────────────────
+        social_sites = ["vk.com", "facebook.com", "linkedin.com",
+                        "youtube.com", "ok.ru"]
+        extras = [f'"{self.company}" site:{s}' for s in social_sites]
+        if dom:
+            extras.append(f'"{self.company}" site:{dom}')
 
-        ql = unique([add_market(q) for q in (ql + llm_q)])
-        return ql[:60]   # жёсткий лимит
+        # dedup сохраняя порядок
+        ql.extend(extras)
+        ql = list(dict.fromkeys(ql))
+        return ql
 
-    # ── 2-шаговый вывод: факты(JSON) → рендер текста
-    async def _facts_json(self, ctx: str) -> str:
-        hint = GROUP_SUMMARY_HINTS.get(self.group, "")
+    # ---------- финальный отчёт ----------------------------------------
+    async def _summary(self, ctx: str) -> str:
         sys = (
-            "Извлеки СТРУКТУРИРОВАННЫЕ ФАКТЫ о компании в JSON без лишнего текста. "
-            "Схема: {"
-            '"description": str|null,'
-            '"brands": [str],'
-            '"headcount": {"value": number|null, "year": number|null, "sources":[string]},'
-            '"capacity": [{"metric": str, "value": str, "year": number|null, "site": str|null, "sources":[string]}],'
-            '"investments": [{"desc": str, "amount": str|null, "year": number|null, "sources":[string]}],'
-            '"addresses": [{"type":"hq|plant", "value": str, "sources":[string]}],'
-            '"socials": [{"type":"site|vk|fb|linkedin|youtube|ok", "url": str}],'
-            '"history": [{"year": number|null, "event": str, "sources":[string]}],'
-            '"production": [{"product": str, "volume": str, "period": str|null, "sources":[string]}],'
-            '"competitors": [{"name": str, "site": str|null}],'
-            '"mentions": [{"type":"forum|rating|news", "url": str}]'
-            "}. "
-            "Пиши только валидный JSON. Если данных нет — null/[] соответственно. "
-            + (f"Учитывай отраслевой контекст: {hint} " if hint else "")
+            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ В ФОРМЕ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ ПО СЛЕДУЮЩИМ ТЕМАТИЧЕСКИМ БЛОКАМ: "
+            "1) ОПИСАНИЕ (миссия, род деятельности, сфера), "
+            "2) ОБЩАЯ ИНФОРМАЦИЯ (юридический статус, дата и место основания, штаб-квартира), "
+            "3) ПАРТНЁРСТВА (ключевые альянсы и сотрудничества), "
+            "4) НАПРАВЛЕНИЯ (ключевые линии бизнеса и инициативы), "
+            "5) ИСТОРИЯ (вехи развития, ключевые события), "
+            "6) ЦИФРЫ (объёмы производства, доля рынка, активы и др. — КРОМЕ ВЫРУЧКИ), "
+            "7) ПРОДУКТЫ (основные категории товаров и услуг), "
+            "8) ГЕОГРАФИЯ (рынки присутствия, регионы продаж, производственные мощности), "
+            "9) СОТРУДНИКИ (численность персонала, ключевые фигуры, корпоративная культура), "
+            "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
+            "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
+            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
+            "В КОНЦЕ ОТДЕЛЬНО ПЕРЕЧИСЛИ ОФИЦИАЛЬНЫЕ СТРАНИЦЫ КОМПАНИИ В VK, FACEBOOK, LINKEDIN, YOUTUBE, OK.RU И НА ЕЁ САЙТЕ, "
+            "УКАЗЫВАЯ ПОЛНЫЙ URL КАЖДОЙ НАЙДЕННОЙ СЕТИ. "
+            "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ.\n"
         )
+        
         return await _gpt(
             [{"role": "system", "content": sys},
-             {"role": "user", "content": ctx[:18000]}],
-            model=self.facts_model, T=0.05
-        )
-
-    async def _render_text_from_facts(self, facts_json: str) -> str:
-        sys = (
-            "Возьми этот JSON с фактами и сверстани непротиворечивый текст без Markdown "
-            "строгим порядком разделов: 1) Описание; 2) Бренды; 3) Численность; "
-            "4) Производственные мощности; 5) Инвестиции и расширения; 6) Адреса HQ и площадок; "
-            "7) Соцсети; 8) История; 9) Прибыль/объёмы продукции; 10) Конкуренты; 11) Упоминания. "
-            "После каждого факта оставляй ссылку в круглых скобках (полный URL). "
-            "Не указывай выручку. Коротко и по делу."
-        )
-        return await _gpt(
-            [{"role": "system", "content": sys},
-             {"role": "user", "content": facts_json}],
-            model=self.render_model, T=0.15
-        )
+             {"role": "user",   "content": ctx[:20_000]}],
+            model=self.llm_model, T=0.25)
 
     def _normalize_sections(self, summary: str) -> str:
         sections = summary.split("\n\n")
@@ -537,61 +385,68 @@ class RAG:
             seen, uniq = set(), []
             for line in lines:
                 if line not in seen:
-                    seen.add(line); uniq.append(line)
+                    seen.add(line)
+                    uniq.append(line)
             norm.append("\n".join(uniq) if uniq else "не найдено")
         return "\n\n".join(norm)
 
+    # ---------- orchestrator -------------------------------------------
     async def _run_async(self):
-        # параллельно: site snippet и паспорт сайта
-        site_ctx_task = asyncio.create_task(self._site_ctx())
-        site_pass_task = (
-            asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
-            if self.website else None
-        )
+        # paralell: сниппет + детальный паспорт сайта
+        site_ctx_task  = asyncio.create_task(self._site_ctx())
+        site_pass_task = None
+        if self.website:
+            # ▸ стало: просто уходим в отдельный поток без внешнего тай-аута
+            site_pass_task = None
+            if self.website:
+                site_pass_task = asyncio.create_task(
+                    asyncio.to_thread(_site_passport_sync, self.website)
+                )
+        
 
-        queries, snippets = [], []
-        news_snippets: list[tuple[str, str]] = []
-
+        queries, snippets, hist = [], [], ""
         async with aiohttp.ClientSession() as s:
-            # генерация запросов 1 раз (стабильнее)
-            ql = await self._queries()
-            queries += ql
-
-            # основной сбор сниппетов
-            res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
-            snippets += sum(res, [])
-
-            # крупные новости
-            news_domains = ["rbc.ru","kommersant.ru","vedomosti.ru","tass.ru","forbes.ru"]
-            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
-            queries += news_queries
-            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
-            news_snippets = sum(res, [])
-            snippets += news_snippets
-
-        # rerank + dedup
-        snippets = rerank_snippets(snippets)
-
-        # соцсети отдельно
-        dom = tldextract.extract(self.website).registered_domain if self.website else ""
-        social_domains = ["vk.com", "facebook.com", "linkedin.com", "youtube.com", "ok.ru"]
-        if dom: social_domains.append(dom)
-        social_snips = [(u, t) for u, t in snippets if any(sd in u.lower() or sd in t.lower() for sd in social_domains)]
+            for _ in range(self.steps):
+                ql = await self._queries(hist)
+                ql = [f"{q} {self.market}" if self.market and
+                      self.market.lower() not in q.lower() else q for q in ql]
+                queries += ql
+                res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
+                snippets += sum(res, [])
+                hist = f"\nСниппетов: {len(snippets)}"
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
 
-        # собираем контекст для LLM: берём топ после rerank (лимит по размеру)
-        ctx_parts: list[str] = []
-        if site_ctx:  ctx_parts.append(f"SITE_SNIPPET:\n{site_ctx}")
-        if site_pass: ctx_parts.append(f"SITE_PASSPORT:\n{site_pass}")
+        # выделяем сниппеты с соцсетями
+        dom = tldextract.extract(self.website).registered_domain if self.website else ""
+        social_domains = ["vk.com", "facebook.com", "linkedin.com",
+                          "youtube.com", "ok.ru"]
+        if dom:
+            social_domains.append(dom)
+        social_snips = [
+            (u, t) for u, t in snippets
+            if any(sd in u.lower() or sd in t.lower() for sd in social_domains)
+        ]
 
-        # факты из company_info (если переданы)
+        # ---------- собираем единый контекст для GPT -----------------
+        ctx_parts: list[str] = []
+
+        # 1) короткий сниппет из Google («site:…»)
+        if site_ctx:
+            ctx_parts.append(f"SITE_SNIPPET:\n{site_ctx}")
+
+        # 2) полный паспорт, сгенерированный SiteRAG
+        if site_pass:
+            ctx_parts.append(f"SITE_PASSPORT:\n{site_pass}")
+
+        # 3) факты из checko / fin-API
         company_doc_txt = ""
-        if self.company_info:
+        if self.company_info:                       # ← был передан в __init__
             def _pair(k, v):
                 if v in (None, "", []): return ""
-                if isinstance(v, list): v = "; ".join(map(str, v[:10]))
+                if isinstance(v, list):
+                    v = "; ".join(map(str, v[:10]))
                 return f"* **{k}:** {v}"
             company_doc_txt = "\n".join(
                 p for p in (_pair(k, v) for k, v in self.company_info.items()) if p
@@ -599,46 +454,49 @@ class RAG:
             if company_doc_txt:
                 ctx_parts.append(f"COMPANY_DOC:\n{company_doc_txt}")
 
+        # 4) соцсети
         if social_snips:
             ctx_parts.append(
-                "SOCIAL_SNIPPETS:\n" + "\n".join(f"URL:{u}\nTXT:{t}" for u, t in social_snips[:30])
+                "SOCIAL_SNIPPETS:\n" +
+                "\n".join(f"URL:{u}\nTXT:{t}" for u, t in social_snips)
             )
 
-        # ограничиваем общий объём сниппетов (после rerank)
-        main_snips_txt = []
-        total_len = 0
-        for u, t in snippets:
-            line = f"URL:{u}\nTXT:{t}"
-            if total_len + len(line) > 16000:
-                break
-            main_snips_txt.append(line)
-            total_len += len(line)
-        ctx_parts.append("\n".join(main_snips_txt))
+        # 5) Google-сниппеты
+        ctx_parts.append(
+            "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snippets)
+        )
 
-        # двухшаговый вывод
-        facts = await self._facts_json("\n\n".join(ctx_parts))
-        summary = await self._render_text_from_facts(facts)
+        # ---------- финальный отчёт ----------------------------------
+        summary = await self._summary("\n\n".join(ctx_parts))
         summary = self._normalize_sections(summary)
 
         return {
-            "summary":       summary,
-            "queries":       queries,
-            "snippets":      snippets,
-            "news_snippets": news_snippets,
-            "site_ctx":      site_ctx,
-            "site_pass":     site_pass,
-            "company_doc":   company_doc_txt,
+            "summary":     summary,
+            "queries":     queries,
+            "snippets":    snippets,
+            "site_ctx":    site_ctx,
+            "site_pass":   site_pass,
+            "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
         }
 
+
+    # ---------- публичный синхронный интерфейс -----------------
     def run(self) -> dict:
+        """
+        Возвращает dict со всеми полями.
+        Корректно работает и когда event-loop уже запущен
+        (например, в Jupyter, внутри Streamlit-callback и т.п.).
+        """
         try:
             loop = asyncio.get_event_loop()
             if loop and loop.is_running():
+                # nest_asyncio.patch() уже вызван выше, поэтому можно:
                 return loop.run_until_complete(self._run_async())
         except RuntimeError:
+            # get_event_loop() может бросить, если цикла нет — тогда просто создаём новый
             pass
-        return asyncio.run(self._run_async())
 
+        return asyncio.run(self._run_async())
 
 
 
