@@ -507,6 +507,8 @@ class RAG:
 
 
 
+
+
 # ╭─🌐  Market RAG helpers ───────────────────────────╮
 async def google_snippets(query: str, num: int = 4):
     q = re.sub(r'[\"\'“”]', '', query)[:80]
@@ -606,21 +608,6 @@ class FastMarketRAG:
 @st.cache_data(ttl=86_400, show_spinner="🔎 Генерируем рыночный отчёт…")
 def get_market_rag(market):
     return FastMarketRAG(market).run()
-
-
-def _parse_market_volumes(summary: str) -> dict[str, float]:
-    """Извлекает пары год–объём из последнего абзаца рыночного отчёта."""
-    vols: dict[str, float] = {}
-    lines = summary.strip().splitlines()
-    if not lines:
-        return vols
-    last = lines[-1]
-    for year, num in re.findall(r"(20\d{2})[^\d]{0,20}([\d\s,\.]+)", last):
-        try:
-            vols[year] = float(num.replace(" ", "").replace(",", "."))
-        except ValueError:
-            continue
-    return vols
 
 
 
@@ -1035,21 +1022,13 @@ def run_ai_insight_tab() -> None:
 
     # ╭─🎛  UI ──────────────────────────────────────────╮
     st.title("📊 AI Company Insight")
-    if st.button("🗑️ Очистить кэш Google"):
-        clear_google_cache()
-        st.success("Кэш очищен")
-    if QUERY_HISTORY:
-        with st.expander("🕓 История запросов"):
-            for i, q in enumerate(QUERY_HISTORY[-50:], 1):
-                st.write(f"{i}. {q}")
     st.markdown("Введите данные (каждая компания — в отдельной строке).")
     
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1: inns_raw  = st.text_area("ИНН")          # ✅ без key=* — нам не нужны две копии
     with c2: names_raw = st.text_area("Название")
     with c3: mkts_raw  = st.text_area("Рынок")
     with c4: sites_raw = st.text_area("Сайт")
-    with c5: group_sel = st.selectbox("Группа", GROUPS)
     
     aggregate_mode = st.checkbox("🧮 Суммировать финансы по всем ИНН")
     
@@ -1063,7 +1042,6 @@ def run_ai_insight_tab() -> None:
             names  = split(names_raw)
             mkts   = split(mkts_raw)
             sites  = split(sites_raw)
-            groups = [group_sel] * len(inns)
             
             # ---------- валидация ----------
             if not inns:
@@ -1074,7 +1052,6 @@ def run_ai_insight_tab() -> None:
                 if len(names) == 1 and len(inns) > 1:  names *= len(inns)
                 if len(mkts)  == 1 and len(inns) > 1:  mkts  *= len(inns)
                 if len(sites) == 1 and len(inns) > 1:  sites *= len(inns)
-                if len(groups) == 1 and len(inns) > 1: groups *= len(inns)
             
                 # теперь всё либо пустое, либо совпадает по длине
                 for lst, lbl in [(names, "Название"), (mkts, "Рынок")]:
@@ -1088,15 +1065,12 @@ def run_ai_insight_tab() -> None:
                     st.error("Число строк во всех трёх полях должно совпадать."); st.stop()
                 if sites and len(sites) != len(inns):
                     st.error("Число строк «Сайт» должно совпадать с числом ИНН."); st.stop()
-                if groups and len(groups) != len(inns):
-                    st.error("Число строк «Группа» должно совпадать с числом ИНН."); st.stop()
             
             # ---------- выравниваем длины списков ----------
             pad = lambda lst: lst if lst else [""] * len(inns)
             names_full = pad(names)
             mkts_full  = pad(mkts)
             sites_full = pad(sites)
-            groups_full = pad(groups)
             YEARS = ["2022", "2023", "2024"]
             df_companies = pd.DataFrame([ck_company(i) for i in inns])
 
@@ -1312,7 +1286,7 @@ def run_ai_insight_tab() -> None:
                     # --- единый RAG-пайплайн (Google-сниппеты + сайт) ---------------------
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(first_name, website=first_site, market=first_mkt, group=groups_full[0]).run()
+                        doc = RAG(first_name, website=first_site, market=first_mkt).run()
                     
                     # ----------- вывод основного отчёта -----------------------------------
                     html_main = _linkify(doc["summary"]).replace("\n", "<br>")
@@ -1356,23 +1330,7 @@ def run_ai_insight_tab() -> None:
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-
-                        vols = _parse_market_volumes(mkt_res["summary"])
-                        if vols:
-                            fig, ax = plt.subplots(figsize=(4, 2))
-                            years = list(vols.keys())
-                            vals = list(vols.values())
-                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
-                            ax.set_xticks(range(len(years)))
-                            ax.set_xticklabels(years)
-                            ax.set_yticks([])
-                            for spine in ax.spines.values():
-                                spine.set_visible(False)
-                            for i, b in enumerate(bars):
-                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
-                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
-                            st.pyplot(fig)
-
+                    
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
@@ -1540,7 +1498,7 @@ def run_ai_insight_tab() -> None:
                     # ────── Описание компании (Google + сайт) ───────────────────────────
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(name, website=site, market=mkt, group=groups_full[idx]).run()     # ← новая переменная
+                        doc = RAG(name, website=site, market=mkt).run()     # ← новая переменная
                     
                     # основной отчёт
                     main_html = _linkify(doc["summary"]).replace("\n", "<br>")
@@ -1577,30 +1535,14 @@ def run_ai_insight_tab() -> None:
                         st.subheader("📈 Рыночный отчёт")
                         with st.spinner("Собираем данные по рынку и генерируем анализ…"):
                             mkt_res = get_market_rag(mkt)
-
+                    
                         mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                         st.markdown(
                             f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
                             f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                             unsafe_allow_html=True,
                         )
-
-                        vols = _parse_market_volumes(mkt_res["summary"])
-                        if vols:
-                            fig, ax = plt.subplots(figsize=(4, 2))
-                            years = list(vols.keys())
-                            vals = list(vols.values())
-                            bars = ax.bar(range(len(years)), vals, color="#4C72B0")
-                            ax.set_xticks(range(len(years)))
-                            ax.set_xticklabels(years)
-                            ax.set_yticks([])
-                            for spine in ax.spines.values():
-                                spine.set_visible(False)
-                            for i, b in enumerate(bars):
-                                ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
-                                        f"{vals[i]:.1f}", ha="center", va="bottom", fontsize=8)
-                            st.pyplot(fig)
-
+                    
                         with st.expander("⚙️ Запросы к Google"):
                             for i, q in enumerate(mkt_res["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
@@ -1725,7 +1667,3 @@ with tab_eye:
 
 
 # In[ ]:
-
-
-
-
