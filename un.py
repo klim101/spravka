@@ -32,6 +32,7 @@ import threading
 import time
 import functools
 import pickle
+import ast
 from pathlib import Path
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
@@ -699,6 +700,20 @@ async def _site_snip(sess, domain:str)->str:
     res = await _snip(sess, f"site:{domain}", n=1)
     return res[0][1] if res else ""
 
+async def _image(sess, query:str)->str:
+    params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
+              "q": query, "num":1, "searchType":"image", "hl":"ru", "gl":"ru"}
+    try:
+        async with sess.get("https://www.googleapis.com/customsearch/v1",
+                             params=params, headers=HEADERS, timeout=8) as r:
+            if r.status!=200:
+                logging.warning(f"[GoogleImg] {r.status}"); return ""
+            js = await r.json()
+            items = js.get("items", [])
+            return items[0]["link"] if items else ""
+    except asyncio.TimeoutError:
+        logging.warning("[GoogleImg] timeout"); return ""
+
 class FastLeadersInterviews:
     """
     Возвращает dict(summary, names, queries, snippets).
@@ -758,73 +773,64 @@ class FastLeadersInterviews:
 
     
     # ---------- 1. РУКОВОДИТЕЛИ / ВЛАДЕЛЬЦЫ ---------------------------
+
     async def _leaders(self, sess):
-        # 1) берём уже очищенные списки из self.cinfo
-        names = []
+        def _tag(name: str, role: str) -> str:
+            if "(" in name:
+                i = name.find("(") + 1
+                return f"{name[:i]}{role}, {name[i:]}"
+            return f"{name} ({role})"
+
+        people: list[dict] = []
         leaders_raw  = self.cinfo.get("leaders_raw")  or []
         founders_raw = self.cinfo.get("founders_raw") or []
-        names.extend(leaders_raw)
-        names.extend(founders_raw)
-    
-        # если списки нашлись, ничего больше не делаем
-        if names:
-            return list(dict.fromkeys(names)), [], [] 
+        for n in leaders_raw:
+            people.append({"name": _tag(n, "генеральный директор")})
+        for n in founders_raw:
+            people.append({"name": _tag(n, "акционер")})
 
-        # 1-B. Если после очистки имена так и не появились → fallback на Google
-        if not names:
-            # ----------------------------------------------------------- #
-            # 1) расширяем список ролей
-            roles_kw = [
-                # founders / owners
-                "основатель", "сооснователь", "owner", "founder",
-                # top-management
-                "генеральный директор", "гендиректор", "CEO",
-                "коммерческий директор", "CCO", "chief commercial officer",
-                "директор по маркетингу", "маркетинговый директор", "CMO",
-                "финансовый директор", "CFO",
-            ]
+        g_queries, g_snips = [], []
 
-            # 2) строим запросы двух типов:
-            #    а) «кто {роль} "{компания}" "{рынок}"»
-            #    б) «"{компания}" {роль}» (+ site:домен, если есть)
-            dom   = self._domain()
-            mkt   = f' "{self.market}"' if self.market else ""
-            g_queries, g_snips = [], []
-
-            for kw in roles_kw:
-                g_queries.append(f'кто {kw} "{self.c}"{mkt}')
-                plain_q = f'"{self.c}" {kw}' + (f' OR site:{dom}' if dom else "")
-                g_queries.append(plain_q)
-
-            # 3) выполняем поиск (≤3 выдачи на запрос, чтобы не шуметь)
+        if not people:
+            g_queries = [f'"{self.c}" владелец', f'"{self.c}" генеральный директор']
             for q in g_queries:
                 g_snips += await _google(sess, q, 3)
-
-            # 4) если сниппеты есть — пускаем их через LLM-фильтр
             if g_snips:
-                sys = ("Ты проф-аналитик. По сниппетам составь список "
-                       "действующих руководителей и владельцев "
-                       "(ФИО, должность).")
-                llm_txt = await _gpt(
-                    [{"role": "system", "content": sys},
-                     {"role": "user",
-                      "content": "\n".join(f'URL:{u}\nTXT:{t}'
-                                           for u, t in g_snips)[:10_000]}],
-                    model=self.model, T=0.12,
-                )
-                names += [ln.strip() for ln in llm_txt.splitlines() if ln.strip()]
+                sys = ("Ты проф-аналитик. По сниппетам выдели ФИО и роль "
+                       "(генеральный директор или владелец). Формат: ФИО (роль)")
+                txt = "\n".join(f'URL:{u}\nTXT:{t}' for u, t in g_snips)[:10_000]
+                llm = await _gpt([
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": txt}
+                ], model=self.model, T=0.12)
+                for line in llm.splitlines():
+                    line = line.strip()
+                    if line:
+                        people.append({"name": line})
 
-        # dedup ---------------------------------------------------------
-        uniq, seen = [], set()
-        for n in names:
-            k = n.lower()
-            if k not in seen:
-                seen.add(k); uniq.append(n)
+        if not people:
+            return [], g_queries, g_snips
 
-        return uniq, g_queries, g_snips
+        news_domains = {"kommersant.ru", "iz.ru", "interfax.ru"}
+        for p in people:
+            fio = p["name"].split("(")[0].strip()
+            q = f"{fio} {self.c}"
+            search = await _google(sess, q, 3)
+            ctx = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in search)[:10_000]
+            bio = await _gpt([
+                {"role": "system", "content": "Кратко опиши биографию: карьера, судебная история, активы, состояние."},
+                {"role": "user", "content": ctx}
+            ], model=self.model, T=0.2)
+            p["bio"] = bio
+            p["news"] = [u for u, _ in search if any(d in urlparse(u).netloc for d in news_domains)]
+            p["photo"] = await _image(sess, q)
+            g_queries.append(q)
+            g_snips.extend(search)
+
+        return people, g_queries, g_snips
 
     # ---------- 2. Интервью (оставьте вашу реализацию) -----------------
-    async def _interviews(self, names: list[str], sess: aiohttp.ClientSession):
+    async def _interviews(self, names: list[dict], sess: aiohttp.ClientSession):
         if not names:
             return [], [], "Свежих интервью не найдено."
     
@@ -834,8 +840,8 @@ class FastLeadersInterviews:
                     if sc else "")
     
         all_queries, all_snips = [], []
-        for fio_role in names:
-            fio = fio_role.split("(")[0].strip()
+        for p in names:
+            fio = p["name"].split("(")[0].strip()
             prompt = (f"Ты — медиа-аналитик. Сформулируй 4-6 Google-запросов, "
                       f"чтобы найти интервью / комментарии «{fio}» "
                       f"из компании «{self.c}». Формат: Q: <query>")
@@ -863,12 +869,24 @@ class FastLeadersInterviews:
         async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20)) as sess:
     
-            names, q_lead, s_lead = await self._leaders(sess)
-            q_int,  s_int, digest = await self._interviews(names, sess)
-    
+            people, q_lead, s_lead = await self._leaders(sess)
+            q_int,  s_int, digest = await self._interviews(people, sess)
+
         # --- ① владельцы / топ-менеджеры ------------------------------------
-        owners_block = ("Топ-менеджеры и владельцы:\n" + "\n".join(names)
-                        if names else "Топ-менеджеры и владельцы не найдены.")
+        if people:
+            blocks = []
+            for p in people:
+                block = p["name"]
+                if p.get("bio"):
+                    block += f"\n{p['bio']}"
+                if p.get("news"):
+                    block += "\nНовости о владельцах:\n" + "\n".join(p["news"])
+                if p.get("photo"):
+                    block += f"\nФото: {p['photo']}"
+                blocks.append(block)
+            owners_block = "\n\n".join(blocks)
+        else:
+            owners_block = "Топ-менеджеры и владельцы не найдены."
     
         # --- ② контакты ------------------------------------------------------
         contacts_block = ""
@@ -890,7 +908,7 @@ class FastLeadersInterviews:
     
         return {
             "summary":  summary_html,
-            "names":    names,
+            "names":    people,
             "queries":  q_lead + q_int,
             "snippets": s_lead + s_int,
         }
@@ -1168,10 +1186,14 @@ def run_ai_insight_tab() -> None:
                             line  = fio
                             if inn:
                                 line += f" (ИНН {inn}"
+
                                 if share is not None:
                                     line += f", доля {float(share):.1f}%)"
                                 else:
                                     line += ")"
+            
+                                line += f", доля {float(share):.1f}%)" if share is not None else ")"
+  
                             out.append(line)
                     return [s for s in out if s]
                 # fallback
