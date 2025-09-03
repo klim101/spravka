@@ -173,7 +173,7 @@ async def _google(sess, q, n=3):
 
 
 
-async def _gpt(messages, *, model="gpt-4o-mini", T=0.2):
+async def _gpt(messages, *, model="gpt-5-mini", T=0.1):
     """Асинхронный вызов OpenAI ChatCompletion → str."""
     chat = await openai.ChatCompletion.acreate(
         model=model, temperature=T, messages=messages)
@@ -670,228 +670,360 @@ def get_market_rag(market):
 
 
 
-# ╭─🌐  Leaders & Interviews (context-aware)  ───────────────────────╮
-import aiohttp, asyncio, re, html, logging, openai, streamlit as st, tldextract
+from __future__ import annotations
+import asyncio, re, logging, json
+import aiohttp
+from dataclasses import dataclass, asdict
+from typing import Iterable
+from urllib.parse import urlparse
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-_URL_PAT = re.compile(r"https?://[^\s)]+")
-def _linkify(txt:str)->str:
-    return _URL_PAT.sub(lambda m:f'<a href="{html.escape(m.group(0))}" target="_blank">ссылка</a>', txt)
+# ---------------------------------------------------------------
+# Внешние зависимости (должны быть определены в проекте):
+#   _google(sess, query: str, k: int) -> list[tuple[str, str]]
+#   _gpt(messages, model: str, T: float) -> str
+#   _image(sess, query: str) -> str | None
+#   _linkify(text: str) -> str
+#   ck_company(inn: str) -> dict  # (опционально)
+#   _site_passport_sync(url: str) -> str  # (опционально)
+# ---------------------------------------------------------------
 
-# --- быстрый сниппет Google ---------------------------------------
-async def _snip(sess: aiohttp.ClientSession, query:str, n:int=4):
-    q = re.sub(r'[\"\'“”]', '', query)[:90]
-    params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
-              "q": q, "num": n, "hl": "ru", "gl": "ru"}
-    try:
-        async with sess.get("https://www.googleapis.com/customsearch/v1",
-                             params=params, headers=HEADERS, timeout=8) as r:
-            if r.status!=200:
-                logging.warning(f"[Google] {r.status}"); return []
-            js = await r.json()
-            return [(it["link"], it.get("snippet",""))
-                    for it in js.get("items",[]) if not _bad(it["link"])]
-    except asyncio.TimeoutError:
-        logging.warning("[Google] timeout"); return []
+RUS_NEWS_DOMAINS: set[str] = {
+    # федеральные
+    "kommersant.ru", "vedomosti.ru", "rbc.ru", "forbes.ru", "tass.ru",
+    "interfax.ru", "iz.ru", "ria.ru", "thebell.io", "lenta.ru", "gazeta.ru",
+    # профильные/региональные
+    "vc.ru", "cnews.ru", "fontanka.ru", "dp.ru", "banki.ru",
+}
 
-# --- контекст-сниппет по домену -----------------------------------
-async def _site_snip(sess, domain:str)->str:
-    if not domain: return ""
-    res = await _snip(sess, f"site:{domain}", n=1)
-    return res[0][1] if res else ""
+INTERVIEW_PAT = re.compile(r"\bинтервью\b|подкаст|Q&A|q&a|в беседе|дал интервью|exclusive|эксклюзив", re.I)
 
-async def _image(sess, query:str)->str:
-    params = {"key": KEYS["GOOGLE_API_KEY"], "cx": KEYS["GOOGLE_CX"],
-              "q": query, "num":1, "searchType":"image", "hl":"ru", "gl":"ru"}
-    try:
-        async with sess.get("https://www.googleapis.com/customsearch/v1",
-                             params=params, headers=HEADERS, timeout=8) as r:
-            if r.status!=200:
-                logging.warning(f"[GoogleImg] {r.status}"); return ""
-            js = await r.json()
-            items = js.get("items", [])
-            return items[0]["link"] if items else ""
-    except asyncio.TimeoutError:
-        logging.warning("[GoogleImg] timeout"); return ""
+LEGAL_KEYWORDS = {
+    "prosecuted": [
+        "уголовное дело", "преслед", "возбуждено дело", "расследуется",
+        "под следствием", "подозревается", "обвин", "дело в отношении",
+    ],
+    "imprisoned": [
+        "арестован", "задержан", "в сизо", "в колонии", "приговор",
+        "осужд", "лишение свободы", "в тюрьме", "домашний арест",
+    ],
+    "sanctioned": [
+        "санкц", "ofac", "sdn", "санкционных спис", "uk sanctions", "eu sanctions",
+    ],
+}
+
+# ----------------- Helpers -----------------
+
+def _norm_ws(s: str | None) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _normalize_name(fio: str) -> str:
+    fio = _norm_ws(fio).replace("\xa0", " ")
+    fio = re.sub(r"\s+", " ", fio)
+    return fio.strip(" \t\n\r\f\v-—\"'")
+
+
+def _dedupe(seq: Iterable[str]) -> list[str]:
+    seen, out = set(), []
+    for x in seq:
+        k = x.lower()
+        if k not in seen:
+            seen.add(k); out.append(x)
+    return out
+
+
+def _is_news(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(d in host for d in RUS_NEWS_DOMAINS)
+
+
+def _scan_legal(text: str) -> dict[str, bool]:
+    t = text.lower()
+    return {k: any(kw in t for kw in kws) for k, kws in LEGAL_KEYWORDS.items()}
+
+
+@dataclass
+class Person:
+    name: str
+    role: str
+    bio: str | None = None
+    news: list[str] | None = None
+    photo: str | None = None
+    sources: list[str] | None = None
+    legal: dict[str, bool] | None = None
+
+    @property
+    def tagged(self) -> str:
+        if "(" in self.name and self.name.endswith(")"):
+            return self.name
+        return f"{self.name} ({self.role})"
+
 
 class FastLeadersInterviews:
     """
     Возвращает dict(summary, names, queries, snippets).
 
-    company_info ждёт структуру Checko/FNS:
-       • general_director / managers / «Руковод»
-       • founders        / «Учред_ФЛ»
+    company_info ждёт структуру Checko/FNS (best-effort):
+      • leaders_raw / founders_raw
+      • general_director / managers / "Руковод"
+      • founders / "Учред_ФЛ"
+      • ИНН / inn
     """
-    def __init__(self, company: str, *,
-                 website: str = "",
-                 market:  str = "",
-                 company_info: dict | None = None,
-                 model: str = "gpt-4o-mini"):
+    def __init__(self, company: str, *, website: str = "", market: str = "",
+                 company_info: dict | None = None, model: str = "gpt-4o-mini"):
+        self.c      = company.strip()
+        self.site   = website.strip()
+        self.market = market.strip()
+        self.cinfo  = company_info or {}
+        self.model  = model
 
-        self.c        = company.strip()
-        self.site     = website.strip()
-        self.market   = market.strip()
-        self.cinfo    = company_info or {}
-        self.model    = model
-
-    # ---------- helpers ------------------------------------------------
+    # ---------------- helpers ----------------
     def _domain(self) -> str:
-        import tldextract
-        return tldextract.extract(self.site).registered_domain if self.site else ""
+        try:
+            import tldextract
+            return tldextract.extract(self.site).registered_domain if self.site else ""
+        except Exception:
+            return ""
 
-    @staticmethod
-    def _fmt_person(p: dict | list | None, default_role: str) -> str | None:
-        # ДОБАВИЛИ ключи 'ФИО' и 'ИНН'
-        if not p:
-            return None
-        if isinstance(p, list):
-            p = next((d for d in p if isinstance(d, dict) and
-                      (d.get("name") or d.get("fio") or d.get("ФИО"))), None)
-            if not p:
-                return None
-        fio  = p.get("name") or p.get("fio") or p.get("ФИО")
-        inn  = p.get("inn")  or p.get("ИНН")
-        role = p.get("type") or p.get("post") or default_role
-        if not fio:
-            return None
-        inn_txt = f", ИНН {inn}" if inn else ""
-        return f"{fio} ({role}{inn_txt})"
+    async def _llm_queries(self, prompt: str, n: int = 8) -> list[str]:
+        raw = await _gpt([
+            {"role": "system", "content": "Сгенерируй короткие Google-запросы, по одному на строку."},
+            {"role": "user",   "content": prompt}
+        ], model=self.model, T=0.18)
+        qs = [q.strip().lstrip("Q:").strip() for q in raw.splitlines() if q.strip()]
+        return _dedupe(qs)[:n]
 
-    async def _llm_queries(self, prompt: str) -> list[str]:
-        """
-        Отправляет prompt в GPT-4o (или любую self.model) и
-        вытаскивает строки вида  Q: <query>  из ответа.
-        """
-        raw = await _gpt(
-            [{"role": "system", "content": prompt},
-             {"role": "user",   "content": ""}],
-            model=self.model,
-            T=0.14,
-        )
-        import re
-        return re.findall(r"(?:Q|QUERY)[:\-]\s*(.+)", raw, flags=re.I)
+    # ---------- 1) РУКОВОДИТЕЛИ / ВЛАДЕЛЬЦЫ ----------
+    async def _leaders(self, sess: aiohttp.ClientSession):
+        people: list[Person] = []
+        queries: list[str] = []
+        snips:   list[tuple[str, str]] = []
 
-    
-    # ---------- 1. РУКОВОДИТЕЛИ / ВЛАДЕЛЬЦЫ ---------------------------
+        # 0) Из company_info (несколько возможных ключей)
+        def _push_name(x, role):
+            if isinstance(x, str) and x.strip():
+                people.append(Person(name=_normalize_name(x), role=role))
+            elif isinstance(x, dict):
+                fio = x.get("name") or x.get("fio") or x.get("ФИО") or ""
+                if fio: people.append(Person(name=_normalize_name(fio), role=role))
+            elif isinstance(x, list):
+                for y in x: _push_name(y, role)
 
-    async def _leaders(self, sess):
-        def _tag(name: str, role: str) -> str:
-            if "(" in name:
-                i = name.find("(") + 1
-                return f"{name[:i]}{role}, {name[i:]}"
-            return f"{name} ({role})"
+        _push_name(self.cinfo.get("leaders_raw"),  "генеральный директор")
+        _push_name(self.cinfo.get("founders_raw"), "акционер")
+        _push_name(self.cinfo.get("general_director"), "генеральный директор")
+        _push_name(self.cinfo.get("Руковод"), "генеральный директор")
+        _push_name(self.cinfo.get("Учред_ФЛ"), "акционер")
+        _push_name(self.cinfo.get("founders"), "акционер")
 
-        people: list[dict] = []
-        leaders_raw  = self.cinfo.get("leaders_raw")  or []
-        founders_raw = self.cinfo.get("founders_raw") or []
-        for n in leaders_raw:
-            people.append({"name": _tag(n, "генеральный директор")})
-        for n in founders_raw:
-            people.append({"name": _tag(n, "акционер")})
+        # 1) Checko по ИНН (мягко)
+        inn = self.cinfo.get("ИНН") or self.cinfo.get("inn")
+        if inn:
+            try:
+                cdata = ck_company(str(inn))
+                fio_dir = _normalize_name(cdata.get("Руководитель", {}).get("ФИО") or cdata.get("CEO") or "")
+                if fio_dir:
+                    people.append(Person(name=fio_dir, role="генеральный директор"))
+                for f in cdata.get("УчредителиФЛ") or []:
+                    fio = _normalize_name(f.get("ФИО") or f.get("fio") or "")
+                    if fio:
+                        people.append(Person(name=fio, role="акционер"))
+            except Exception as e:
+                logging.warning(f"[ck_company] {inn}: {e}")
 
-        g_queries, g_snips = [], []
-
+        # 2) Если пусто → сначала найдём ФИО гендира из Google
         if not people:
-            g_queries = [f'"{self.c}" владелец', f'"{self.c}" генеральный директор']
-            for q in g_queries:
-                g_snips += await _google(sess, q, 3)
-            if g_snips:
-                sys = ("Ты проф-аналитик. По сниппетам выдели ФИО и роль "
-                       "(генеральный директор или владелец). Формат: ФИО (роль)")
-                txt = "\n".join(f'URL:{u}\nTXT:{t}' for u, t in g_snips)[:10_000]
+            base_q = [f'"{self.c}" генеральный директор', f'"{self.c}" CEO']
+            for q in base_q:
+                queries.append(q)
+                snips.extend(await _google(sess, q, 3))
+            if snips:
+                sys = (
+                    "Ты аналитик. Из сниппетов извлеки ФИО генерального директора. "
+                    "Формат: NAME: <ФИО>"
+                )
+                txt = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in snips)[:10_000]
                 llm = await _gpt([
                     {"role": "system", "content": sys},
-                    {"role": "user", "content": txt}
-                ], model=self.model, T=0.12)
-                for line in llm.splitlines():
-                    line = line.strip()
-                    if line:
-                        people.append({"name": line})
+                    {"role": "user",   "content": txt}
+                ], model=self.model, T=0.1)
+                m = re.search(r"NAME:\s*(.+)$", llm.strip())
+                if m:
+                    people.append(Person(name=_normalize_name(m.group(1)), role="генеральный директор"))
+
+        # 3) Дедуп по (имя, роль)
+        seen = set(); ded = []
+        for p in people:
+            k = (p.name.lower(), p.role.lower())
+            if k in seen: continue
+            seen.add(k); ded.append(p)
+        people = ded
 
         if not people:
-            return [], g_queries, g_snips
+            return [], queries, snips
 
-        news_domains = {"kommersant.ru", "iz.ru", "interfax.ru"}
-        for p in people:
-            fio = p["name"].split("(")[0].strip()
-            q = f"{fio} {self.c}"
-            search = await _google(sess, q, 3)
-            ctx = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in search)[:10_000]
-            bio = await _gpt([
-                {"role": "system", "content": "Кратко опиши биографию: карьера, судебная история, активы, состояние."},
-                {"role": "user", "content": ctx}
-            ], model=self.model, T=0.2)
-            p["bio"] = bio
-            p["news"] = [u for u, _ in search if any(d in urlparse(u).netloc for d in news_domains)]
-            p["photo"] = await _image(sess, q)
-            g_queries.append(q)
-            g_snips.extend(search)
+        # 4) Обогащение: биографии/юрстатус/фото/СМИ-ссылки
+        sem_http = asyncio.Semaphore(6)
+        sem_llm  = asyncio.Semaphore(2)
 
-        return people, g_queries, g_snips
+        async def enrich(p: Person) -> Person:
+            fio = p.name.split("(")[0].strip()
 
-    # ---------- 2. Интервью (оставьте вашу реализацию) -----------------
+            qset = {
+                f'"{fio}" {self.c}',
+                f'"{fio}" {self.c} биография',
+                f'"{fio}" биография',
+                f'"{fio}" {self.c} карьера',
+                f'"{fio}" активы', f'"{fio}" состояние', f'"{fio}" капитал', f'"{fio}" Forbes',
+                f'"{fio}" супруг', f'"{fio}" супруга', f'"{fio}" жена', f'"{fio}" муж',
+                f'"{fio}" дети', f'"{fio}" сын', f'"{fio}" дочь',
+                f'"{fio}" родственник', f'"{fio}" связаны', f'"{fio}" родственник чиновник',
+                f'"{fio}" друг бизнесмен', f'"{fio}" чиновник',
+                f'"{fio}" уголовное дело', f'"{fio}" арест', f'"{fio}" санкции',
+            }
+            try:
+                prompt = (
+                    f"Сгенерируй 4–8 гугл‑запросов для фактов о '{fio}' из '{self.c}': "
+                    f"карьера/где работал; активы/состояние/Forbes; семья (супруг(а), дети); "
+                    f"связи/родственники (госслужба, бизнесмены); юридический статус (дела, аресты, санкции)."
+                )
+                qset.update(await self._llm_queries(prompt))
+            except Exception as e:
+                logging.warning(f"[llm-queries] {fio}: {e}")
+
+            search_all: list[tuple[str, str]] = []
+            for q in _dedupe(list(qset)):
+                async with sem_http:
+                    try:
+                        res = await _google(sess, q, 3)
+                    except Exception as e:
+                        logging.warning(f"[google] {q}: {e}")
+                        res = []
+                queries.append(q)
+                snips.extend(res)
+                search_all.extend(res)
+
+            ctx = "\n".join(f"URL:{u}\nTXT:{t}" for u, t in search_all)[:10_000]
+            sys_bio = (
+                "Сжато и только проверяемые факты. Выведи пунктами:\n"
+                "1) Карьера/где работал (2–3 факта).\n"
+                "2) Активы и оценка состояния (если есть).\n"
+                "3) Семья: супруг(а), дети (если упоминаются).\n"
+                "4) Связи/родственники: госслужащие/бизнесмены (если подтверждено).\n"
+                "5) Юридический статус: преследуется/сидел/под санкциями (если есть).\n"
+                "Если данных нет — пиши 'нет данных'. В конце строка: Источники: URL1; URL2; URL3 (до 3)."
+            )
+            async with sem_llm:
+                bio = await _gpt([
+                    {"role": "system", "content": sys_bio},
+                    {"role": "user",   "content": ctx},
+                ], model=self.model, T=0.15)
+            p.bio = _norm_ws(bio)
+
+            p.legal = _scan_legal("\n".join(t for _, t in search_all))
+            p.news  = _dedupe([u for u, _ in search_all if _is_news(u)])
+
+            async with sem_http:
+                try:
+                    p.photo = await _image(sess, f"{fio} {self.c}")
+                except Exception as e:
+                    logging.warning(f"[photo] {fio}: {e}")
+                    p.photo = None
+
+            p.sources = [u for u, _ in search_all]
+            return p
+
+        people = await asyncio.gather(*[enrich(p) for p in people])
+        return [asdict(p) | {"name": p.tagged} for p in people], queries, snips
+
+    # ---------- 2) Интервью и новости о компании (СМИ‑только) ----------
     async def _interviews(self, names: list[dict], sess: aiohttp.ClientSession):
-        if not names:
-            return [], [], "Свежих интервью не найдено."
-    
-        dom   = self._domain()
-        sc    = await self._site_ctx(sess)
-        base_ctx = (f"SITE_CONTEXT:\n{sc}\nрынок компании – {self.market}\n\n"
-                    if sc else "")
-    
-        all_queries, all_snips = [], []
-        for p in names:
+        dom = self._domain()
+        sc  = await self._site_ctx(sess)
+        base_ctx = (f"SITE_CONTEXT:\n{sc}\nрынок компании – {self.market}\n\n" if sc else "")
+
+        def qpack_person(fio: str) -> list[str]:
+            qs = [
+                f'"{fio}" интервью', f'"{fio}" комментарий', f'"{fio}" дал интервью',
+                f'"{fio}" подкаст', f'"{fio}" выступил', f'"{fio}" {self.c}',
+            ]
+            if dom: qs.append(f'"{fio}" site:{dom}')
+            return qs
+
+        q_company = [
+            f'"{self.c}" интервью', f'"{self.c}" комментарий', f'"{self.c}" новость',
+        ]
+        if dom: q_company.append(f'"{self.c}" site:{dom}')
+
+        all_queries: list[str] = []
+        all_snips:   list[tuple[str, str]] = []
+
+        async def pull(q: str):
+            all_queries.append(q)
+            try:
+                all_snips.extend(await _google(sess, q, 3))
+            except Exception as e:
+                logging.warning(f"[interviews-google] {q}: {e}")
+
+        tasks = [pull(q) for q in q_company]
+        for p in (names or []):
             fio = p["name"].split("(")[0].strip()
-            prompt = (f"Ты — медиа-аналитик. Сформулируй 4-6 Google-запросов, "
-                      f"чтобы найти интервью / комментарии «{fio}» "
-                      f"из компании «{self.c}». Формат: Q: <query>")
-            qlist = await self._llm_queries(prompt)
-            for q in qlist:
-                full_q = q + (f' OR site:{dom}' if dom and "site:" not in q.lower() else "")
-                all_queries.append(full_q)
-                all_snips += await _google(sess, full_q, 3)
-    
-        if not all_snips:
-            return all_queries, [], "Свежих интервью не найдено."
-    
-        ctx = base_ctx + "\n".join(f"URL:{u}\nTXT:{t}" for u, t in all_snips)[:16_000]
-    
-        sys = ("Ты — контент-аналитик. Составь дайджест релевантных интервью. "
-               "Для каждого: ФИО, роль, дата, 1-2 фразы сути, ссылка.")
-        digest = await _gpt([{"role": "system", "content": sys},
-                             {"role": "user",   "content": ctx}],
-                            model=self.model, T=0.18)
-        return all_queries, all_snips, digest
+            tasks += [pull(q) for q in qpack_person(fio)]
+        await asyncio.gather(*tasks)
 
-    # ------------------------------------------------------------------
-    # ---------- orchestrator ------------------------------------------------
+        # СМИ-фильтр
+        news_snips = [(u, t) for u, t in all_snips if _is_news(u)]
+        if not news_snips:
+            return all_queries, [], "Свежих интервью и новостей не найдено."
+
+        # Классификация по ключевым словам
+        interviews = _dedupe([u for u, t in news_snips if INTERVIEW_PAT.search(u) or INTERVIEW_PAT.search(t)])
+        news_urls  = _dedupe([u for u, _ in news_snips])
+
+        ctx = base_ctx + "\n".join(f"URL:{u}\nTXT:{t}" for u, t in news_snips)[:16_000]
+        sys = (
+            "Ты — контент-аналитик. Составь краткий дайджест ТОЛЬКО по ссылкам СМИ.\n"
+            "Секции: 1) Интервью; 2) Новости о компании.\n"
+            "Для каждого пункта: дата (если видна), 1–2 фразы сути, ссылка. Макс 8 пунктов на секцию."
+        )
+        digest = await _gpt([
+            {"role": "system", "content": sys},
+            {"role": "user",   "content": ctx},
+        ], model=self.model, T=0.18)
+
+        # Можно дополнительно вернуть сырые URL
+        extra = {"interview_urls": interviews, "news_urls": news_urls}
+        return all_queries, news_snips, _norm_ws(digest) + "\n\n" + json.dumps(extra, ensure_ascii=False)
+
+    # ---------- 3) Orchestrator ----------
     async def _run_async(self):
-        async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=20)) as sess:
-    
+        timeout = aiohttp.ClientTimeout(total=45)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
             people, q_lead, s_lead = await self._leaders(sess)
-            q_int,  s_int, digest = await self._interviews(people, sess)
+            q_int,  s_int, digest  = await self._interviews(people, sess)
 
-        # --- ① владельцы / топ-менеджеры ------------------------------------
+        # ① Владельцы/топ-менеджеры c биографиями
         if people:
             blocks = []
             for p in people:
                 block = p["name"]
-                if p.get("bio"):
-                    block += f"\n{p['bio']}"
-                if p.get("news"):
-                    block += "\nНовости о владельцах:\n" + "\n".join(p["news"])
+                if p.get("bio"):   block += f"\nБиография:\n{p['bio']}"
+                lf = (p.get("legal") or {})
+                if any(lf.values()):
+                    tags = []
+                    if lf.get("prosecuted"): tags.append("преследуется")
+                    if lf.get("imprisoned"): tags.append("был(а) в тюрьме/арест")
+                    if lf.get("sanctioned"): tags.append("под санкциями")
+                    if tags: block += "\n⚖️ Правовой статус: " + ", ".join(tags)
+                if p.get("news"): block += "\nСМИ-ссылки:\n" + "\n".join(p["news"][:6])
                 photo = p.get("photo")
-                if photo:
-                    block += f"\nФото: {photo}"
-                else:
-                    block += "\nФото: изображение не найдено"
+                block += f"\nФото: {photo or 'изображение не найдено'}"
                 blocks.append(block)
             owners_block = "\n\n".join(blocks)
         else:
             owners_block = "Топ-менеджеры и владельцы не найдены."
-    
-        # --- ② контакты ------------------------------------------------------
+
+        # ② Контакты
         contacts_block = ""
         cdata = self.cinfo.get("Контакты") or {}
         if cdata:
@@ -902,13 +1034,12 @@ class FastLeadersInterviews:
             if phones: lines.append(f"Тел: {phones}")
             if emails: lines.append(f"E-mail: {emails}")
             if site:   lines.append(f"Сайт: {site}")
-            if lines:
-                contacts_block = "Контакты:\n" + "\n".join(lines)
-    
-        # --- ③ финальное HTML -----------------------------------------------
+            if lines:  contacts_block = "Контакты:\n" + "\n".join(lines)
+
+        # ③ HTML
         body = "\n\n".join([part for part in (owners_block, contacts_block, digest) if part])
         summary_html = _linkify(body)
-    
+
         return {
             "summary":  summary_html,
             "names":    people,
@@ -916,187 +1047,28 @@ class FastLeadersInterviews:
             "snippets": s_lead + s_int,
         }
 
-    # ---------- публичный sync-интерфейс ------------------------------
+    # ---------- sync wrapper ----------
     def run(self) -> dict:
         try:
             loop = asyncio.get_event_loop()
-            if loop.is_running():                 # Jupyter / Streamlit-callback
+            if loop.is_running():
                 import nest_asyncio; nest_asyncio.apply()
                 return loop.run_until_complete(self._run_async())
         except RuntimeError:
             pass
         return asyncio.run(self._run_async())
 
-    async def _site_ctx(self, sess: aiohttp.ClientSession) -> str | None:
-        """
-        Возвращает краткий паспорт сайта компании (или пустую строку,
-        если self.site не указан). Запускается в отдельном потоке,
-        чтобы не блокировать event-loop.
-        """
-        if not self.site:
+    # ---------- optional site context ----------
+    async def _site_ctx(self, sess: aiohttp.ClientSession) -> str:
+        if not getattr(self, "site", None):
+            return ""
+        loop = asyncio.get_running_loop()
+        try:
+            from functools import partial
+            return await loop.run_in_executor(None, partial(_site_passport_sync, self.site))
+        except Exception:
             return ""
 
-        loop = asyncio.get_running_loop()
-        # _site_passport_sync блокирующий ⇒ отправляем в ThreadPool
-        return await loop.run_in_executor(
-            None,                              # default ThreadPoolExecutor
-            partial(_site_passport_sync, self.site)
-        )
-
-
-# ───────────────────  обёртка для кэша  ─────────────────────────────
-@st.cache_data(ttl=86_400,
-               show_spinner="🔎 Ищем руководителей и интервью…")
-def get_leaders_rag(company: str, *,
-                    website: str = "",
-                    market:  str = "",
-                    company_info: dict | None = None) -> dict:
-    """Streamlit-кэш вокруг FastLeadersInterviews."""
-    return FastLeadersInterviews(
-        company      = company,
-        website      = website,
-        market       = market,
-        company_info = company_info,
-    ).run()
-
-
-
-
-
-# ---------- 1. Универсальный клиент Checko ----------
-@st.cache_data(ttl=3_600)
-def ck_call(endpoint: str, inn: str):
-    """
-    Универсальный вызов к Checko API.
-
-    endpoint : 'company', 'finances', 'analytics', …
-    inn      : строка ИНН
-    """
-    url = f"https://api.checko.ru/v2/{endpoint}"
-    r = requests.get(
-        url,
-        params={"key": KEYS["CHECKO_API_KEY"], "inn": inn},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()["data"]
-
-# ---------- 2. Тонкие обёртки (по желанию) ----------
-ck_company = functools.partial(ck_call, "company")
-ck_fin     = functools.partial(ck_call, "finances")
-# при желании можно добавить ck_analytics = functools.partial(ck_call, "analytics")
-
-
-
-# ---------- 4. Помощник для лидеров / учредителей ----------
-def extract_people(cell) -> list[str]:
-    """
-    Нормализует ячейку «Руковод» / «Учред_ФЛ» и
-    возвращает список строк «ФИО (ИНН…, доля …%)».
-    """
-    # 0) сразу отсекаем None / NaN
-    if cell is None or (isinstance(cell, float) and pd.isna(cell)):
-        return []
-
-    # 1) если это строка → пробуем распарсить как Python-литерал
-    if isinstance(cell, str):
-        cell = cell.strip()
-        if not cell:
-            return []
-        try:
-            cell = ast.literal_eval(cell)  # '[{…}]' → list | dict | str
-        except (ValueError, SyntaxError):
-            # просто строка с одним ФИО
-            return [cell]
-
-    # 2) одиночный dict → оборачиваем в list
-    if isinstance(cell, dict):
-        cell = [cell]
-
-    # 3) если это уже list — обрабатываем каждый элемент
-    if isinstance(cell, list):
-        people = []
-        for item in cell:
-            if isinstance(item, str):
-                people.append(item.strip())
-            elif isinstance(item, dict):
-                fio  = item.get("ФИО") or item.get("fio") or ""
-                inn  = item.get("ИНН") or item.get("inn")
-                share = item.get("Доля", {}).get("Процент")
-                line = fio
-                if inn:
-                    line += f" (ИНН {inn}"
-                    if share is not None:
-                        line += f", доля {float(share):.1f}%)"
-                    else:
-                        line += ")"
-                people.append(line)
-        return [p for p in people if p]      # без пустых строк
-    # 4) неизвестный тип → оборачиваем в строку
-    return [str(cell)]
-
-
-
-def _safe_div(a: float | None, b: float | None) -> float | None:
-    if a is None or b in (None, 0):
-        return None
-    try:
-        return a / b
-    except ZeroDivisionError:
-        return None
-
-
-
-
-
-
-import openai, asyncio, nest_asyncio, logging
-nest_asyncio.apply()
-
-# кешируем, чтобы при повторных кликах не дергать LLM и сайт заново
-@st.cache_data(ttl=86_400, show_spinner=False)
-def get_site_passport(url: str) -> dict:
-    """Синхронный обёртка SiteRAG.run() с кешированием."""
-    if not url:
-        return {"summary": "", "chunks_out": [], "html_size": "0", "url": url}
-    try:
-        return SiteRAG(url).run()
-    except Exception as e:
-        logging.warning(f"[SiteRAG] {url} → {e}")
-        return {"summary": f"(не удалось распарсить сайт: {e})",
-                "chunks_out": [], "html_size": "0", "url": url}
-
-
-
-
-
-
-
-
-
-def run_ai_insight_tab() -> None:
-        # ── 1. «очистка» (если пользователь хочет перезапустить отчёт)
-    if st.session_state.get("ai_result_ready"):
-        rep = st.session_state["ai_report"]
-    
-        # --- выводим всё из session_state вместо повторного расчёта ---
-        if rep.get("doc"):
-            st.markdown(rep["doc"]["summary_rendered_html"], unsafe_allow_html=True)
-        if rep.get("tbl") is not None:
-            st.dataframe(rep["tbl"], use_container_width=True)
-        if rep.get("graphics"):
-            st.pyplot(rep["graphics"])
-        # и т.д.
-    
-        # кнопка «Сбросить и построить заново»
-        if st.button("🔄 Построить новый отчёт", type="primary"):
-            st.session_state.pop("ai_result_ready", None)
-            st.session_state.pop("ai_report", None)
-            try:
-                st.rerun()
-            except AttributeError:
-                st.experimental_rerun()
-        return   
         
 
     # ╭─🎛  UI ──────────────────────────────────────────╮
