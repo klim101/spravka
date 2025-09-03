@@ -775,19 +775,13 @@ class FastLeadersInterviews:
     # ---------- 1. РУКОВОДИТЕЛИ / ВЛАДЕЛЬЦЫ ---------------------------
 
     async def _leaders(self, sess):
-        def _tag(name: str, role: str) -> str:
-            if "(" in name:
-                i = name.find("(") + 1
-                return f"{name[:i]}{role}, {name[i:]}"
-            return f"{name} ({role})"
-
         people: list[dict] = []
         leaders_raw  = self.cinfo.get("leaders_raw")  or []
         founders_raw = self.cinfo.get("founders_raw") or []
         for n in leaders_raw:
-            people.append({"name": _tag(n, "генеральный директор")})
+            people.append({"name": n, "role": "генеральный директор"})
         for n in founders_raw:
-            people.append({"name": _tag(n, "акционер")})
+            people.append({"name": n, "role": "акционер"})
 
         g_queries, g_snips = [], []
 
@@ -806,7 +800,15 @@ class FastLeadersInterviews:
                 for line in llm.splitlines():
                     line = line.strip()
                     if line:
-                        people.append({"name": line})
+                        name = line
+                        role = "акционер"
+                        if "(" in line and ")" in line:
+                            fio, rest = line.split("(", 1)
+                            role_part = rest.split(")", 1)[0].lower()
+                            name = fio.strip()
+                            if "директор" in role_part:
+                                role = "генеральный директор"
+                        people.append({"name": name, "role": role})
 
         if not people:
             return [], g_queries, g_snips
@@ -821,7 +823,7 @@ class FastLeadersInterviews:
                 {"role": "system", "content": "Кратко опиши биографию: карьера, судебная история, активы, состояние."},
                 {"role": "user", "content": ctx}
             ], model=self.model, T=0.2)
-            p["bio"] = bio
+            p["bio"] = f"{p['role'].capitalize()}: {bio}"
             p["news"] = [u for u, _ in search if any(d in urlparse(u).netloc for d in news_domains)]
             p["photo"] = await _image(sess, q)
             g_queries.append(q)
