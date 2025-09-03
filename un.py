@@ -1006,7 +1006,7 @@ def extract_people(cell) -> list[str]:
                 if inn:
                     line += f" (ИНН {inn}"
                     if share is not None:
-                        line += f", доля {share}%)"
+                        line += f", доля {float(share):.1f}%)"
                     else:
                         line += ")"
                 people.append(line)
@@ -1168,7 +1168,10 @@ def run_ai_insight_tab() -> None:
                             line  = fio
                             if inn:
                                 line += f" (ИНН {inn}"
-                                line += f", доля {int(share)}%)" if share is not None else ")"
+                                if share is not None:
+                                    line += f", доля {float(share):.1f}%)"
+                                else:
+                                    line += ")"
                             out.append(line)
                     return [s for s in out if s]
                 # fallback
