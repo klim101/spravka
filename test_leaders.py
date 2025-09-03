@@ -42,3 +42,44 @@ def test_leaders_bio_and_news(monkeypatch):
     assert people[0]["bio"] == "career; legal; assets; net worth"
     assert people[0]["news"] == ["https://kommersant.ru/test"]
     assert people[0]["photo"] == "https://img.com/pic.jpg"
+
+
+def test_leaders_fallback(monkeypatch):
+    monkeypatch.setattr(st, "secrets", {
+        "OPENAI_API_KEY": "x",
+        "GOOGLE_API_KEY": "x",
+        "GOOGLE_CX": "x",
+        "CHECKO_API_KEY": "x",
+        "DYXLESS_TOKEN": "x",
+    })
+    un = importlib.import_module("un")
+
+    async def fake_google(sess, q, n=3):
+        if "владелец" in q:
+            return [("https://example.com/own", "Владелец компании Comp Иванов Иван Петрович")]
+        if "генеральный директор" in q:
+            return [("https://example.com/ceo", "Генеральный директор Comp Петров Петр Сергеевич")]
+        return []
+
+    async def fake_gpt(messages, **kwargs):
+        return ""
+
+    async def fake_image(sess, q):
+        return ""
+
+    monkeypatch.setattr(un, "_google", fake_google)
+    monkeypatch.setattr(un, "_gpt", fake_gpt)
+    monkeypatch.setattr(un, "_image", fake_image)
+
+    rag = un.FastLeadersInterviews("Comp")
+
+    async def run():
+        async with aiohttp.ClientSession() as sess:
+            people, _, _ = await rag._leaders(sess)
+            return people
+    people = asyncio.run(run())
+
+    assert {p["name"] for p in people} == {
+        "Иванов Иван Петрович (владелец)",
+        "Петров Петр Сергеевич (генеральный директор)",
+    }
