@@ -152,6 +152,7 @@ def dyxless_query(query: str,
 
 # ╭─🔧  вспомогалки ───────────────────────────────╮
 _BAD = ("vk.com", "facebook.", ".pdf", ".jpg", ".png")
+FIO_RE = re.compile(r"[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Win64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 def _bad(u: str) -> bool: return any(b in u.lower() for b in _BAD)
 
@@ -792,21 +793,22 @@ class FastLeadersInterviews:
         g_queries, g_snips = [], []
 
         if not people:
-            g_queries = [f'"{self.c}" владелец', f'"{self.c}" генеральный директор']
-            for q in g_queries:
-                g_snips += await _google(sess, q, 3)
-            if g_snips:
-                sys = ("Ты проф-аналитик. По сниппетам выдели ФИО и роль "
-                       "(генеральный директор или владелец). Формат: ФИО (роль)")
-                txt = "\n".join(f'URL:{u}\nTXT:{t}' for u, t in g_snips)[:10_000]
-                llm = await _gpt([
-                    {"role": "system", "content": sys},
-                    {"role": "user", "content": txt}
-                ], model=self.model, T=0.12)
-                for line in llm.splitlines():
-                    line = line.strip()
-                    if line:
-                        people.append({"name": line})
+            queries = [
+                (f'"{self.c}" владелец', "владелец"),
+                (f'"{self.c}" генеральный директор', "генеральный директор"),
+            ]
+            found: dict[str, str] = {}
+            for q, role in queries:
+                g_queries.append(q)
+                snips = await _google(sess, q, 3)
+                g_snips.extend(snips)
+                for _, sn in snips:
+                    for fio in FIO_RE.findall(sn):
+                        fio = fio.strip()
+                        if fio:
+                            found.setdefault(fio, role)
+            for fio, role in found.items():
+                people.append({"name": f"{fio} ({role})"})
 
         if not people:
             return [], g_queries, g_snips
