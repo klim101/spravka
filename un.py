@@ -769,6 +769,18 @@ class FastLeadersInterviews:
       • founders / "Учред_ФЛ"
       • ИНН / inn
     """
+    def get_leaders_rag(name: str, *, website: str = "", market: str = "", company_info: dict | None = None):
+    return FastLeadersInterviews(name, website=website, market=market, company_info=company_info).run()
+
+    def _safe_div(a, b):
+    try:
+        if a is None or b in (None, 0):
+            return None
+        return a / b
+    except Exception:
+        return None
+
+    
     def __init__(self, company: str, *, website: str = "", market: str = "",
                  company_info: dict | None = None, model: str = "gpt-4o-mini"):
         self.c      = company.strip()
@@ -1071,16 +1083,16 @@ class FastLeadersInterviews:
 
         
 
-    # ╭─🎛  UI ──────────────────────────────────────────╮
+def run_ai_insight_tab() -> None:
     st.title("📊 AI Company Insight")
     st.markdown("Введите данные (каждая компания — в отдельной строке).")
-    
+
     c1, c2, c3, c4 = st.columns(4)
-    with c1: inns_raw  = st.text_area("ИНН")          # ✅ без key=* — нам не нужны две копии
+    with c1: inns_raw  = st.text_area("ИНН")
     with c2: names_raw = st.text_area("Название")
     with c3: mkts_raw  = st.text_area("Рынок")
     with c4: sites_raw = st.text_area("Сайт")
-    
+
     aggregate_mode = st.checkbox("🧮 Суммировать финансы по всем ИНН")
     blocks = st.multiselect(
         "Выберите блоки отчёта",
@@ -1729,24 +1741,3 @@ with tab_ai:
 
 with tab_eye:
     run_advance_eye_tab()      # поиск Dyxless
-
-
-# In[6]:
-
-
-
-
-
-# In[14]:
-
-
-
-
-
-# In[13]:
-
-
-
-
-
-# In[ ]:
