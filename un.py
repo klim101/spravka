@@ -774,11 +774,11 @@ class FastLeadersInterviews:
 
     def _safe_div(a, b):
         try:
-        if a is None or b in (None, 0):
+            if a is None or b in (None, 0):
+                return None
+            return a / b
+        except Exception:
             return None
-        return a / b
-    except Exception:
-        return None
 
     
     def __init__(self, company: str, *, website: str = "", market: str = "",
