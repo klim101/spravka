@@ -9,7 +9,12 @@
 
 # In[6]:
 
-
+from __future__ import annotations
+import asyncio, re, logging, json
+import aiohttp
+from dataclasses import dataclass, asdict
+from typing import Iterable
+from urllib.parse import urlparse
 # Устанавливаем API-ключ OpenAI
 import os
 import requests
@@ -670,12 +675,7 @@ def get_market_rag(market):
 
 
 
-from __future__ import annotations
-import asyncio, re, logging, json
-import aiohttp
-from dataclasses import dataclass, asdict
-from typing import Iterable
-from urllib.parse import urlparse
+
 
 # ---------------------------------------------------------------
 # Внешние зависимости (должны быть определены в проекте):
