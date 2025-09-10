@@ -273,7 +273,6 @@ class RAG:
     summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
     queries    – запросы, которые LLM сгенерировала для Google
     snippets   – список (url, text) из Google
-    news_snippets – сниппеты с крупных новостных сайтов
     site_ctx   – короткий сниппет «site:<домен> …»
     site_pass  – подробный паспорт сайта (готовый summary от SiteRAG)
     """
@@ -304,10 +303,9 @@ class RAG:
         dom  = tldextract.extract(self.website).registered_domain if self.website else ""
         base = f'"{self.company}"' + (f' OR site:{dom}' if dom else "")
         sys  = (
-            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ НЕ МЕНЕЕ 30 ПРОСТЫХ РАЗНООБРАЗНЫХ GOOGLE-ЗАПРОСОВ НА РУССКОМ ЯЗЫКЕ, "
+            "ТЫ — ОПЫТНЫЙ ИССЛЕДОВАТЕЛЬ РЫНКОВ И ДАННЫХ. СФОРМУЛИРУЙ 20 ТОЧНЫХ GOOGLE-ЗАПРОСОВ, "
             f"ПОЗВОЛЯЮЩИХ СОБРАТЬ ИНФОРМАЦИЮ О КОМПАНИИ «{self.company}» НА РЫНКЕ «{self.market}» "
             f"({self.country}, {', '.join(map(str, self.years))}).\n"
-            "КАЖДЫЙ ЗАПРОС ОБЯЗАТЕЛЬНО ДОЛЖЕН СОДЕРЖАТЬ НАЗВАНИЕ КОМПАНИИ.\n"
             "### ОБЯЗАТЕЛЬНЫЕ БЛОКИ\n"
             "1. ОПИСАНИЕ КОМПАНИИ И БРЕНДЫ.\n"
             "2. ЧИСЛЕННОСТЬ СОТРУДНИКОВ.\n"
@@ -319,7 +317,7 @@ class RAG:
             "8. ПРИБЫЛЬ И ОБЪЁМЫ ПРОДУКЦИИ.\n"
             "9. КОНКУРЕНТЫ (НАЗВАНИЕ И САЙТ).\n"
             "10. УПОМИНАНИЯ НА ФОРУМАХ И В РЕЙТИНГАХ.\n"
-            "ПО КАЖДОМУ БЛОКУ СДЕЛАЙ НЕСКОЛЬКО РАЗНЫХ ЗАПРОСОВ.\n"
+            "ДЛЯ КАЖДОГО БЛОКА СДЕЛАЙ МИНИМУМ ПО ОДНОМУ ЗАПРОСУ НА РУССКОМ И ОДНОМ НА АНГЛИЙСКОМ.\n"
             "### СОВЕТЫ ПО КОНСТРУКЦИИ ЗАПРОСОВ\n"
             "- ИСПОЛЬЗУЙ ОПЕРАТОРЫ: `site:`, `intitle:`, `inurl:`, `filetype:pdf`, `OR`.\n"
             "- ДОБАВЛЯЙ ГОДЫ И НАЗВАНИЯ ПРОДУКТОВ И БРЕНДОВ, ЕСЛИ НУЖНО.\n"
@@ -341,26 +339,6 @@ class RAG:
             model=self.llm_model, T=0.1)
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
-        if not hist:
-            templates = [
-                f'"{self.company}" описание',
-                f'"{self.company}" бренды',
-                f'"{self.company}" сотрудники',
-                f'"{self.company}" численность',
-                f'"{self.company}" производственные мощности',
-                f'"{self.company}" инвестиции',
-                f'"{self.company}" расширение',
-                f'"{self.company}" адрес',
-                f'"{self.company}" история',
-                f'"{self.company}" прибыль',
-                f'"{self.company}" объём производства',
-                f'"{self.company}" конкуренты',
-                f'"{self.company}" рейтинг',
-                f'форум "{self.company}"',
-                f'site:news.* "{self.company}"',
-            ]
-            ql = templates + [q for q in ql if q not in templates]
-
         # ─── целевые соцсети и официальный сайт ──────────────────────
         social_sites = ["vk.com", "facebook.com", "linkedin.com",
                         "youtube.com", "ok.ru"]
@@ -376,24 +354,22 @@ class RAG:
     # ---------- финальный отчёт ----------------------------------------
     async def _summary(self, ctx: str) -> str:
         sys = (
-            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ "
-            "АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ ИЗ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ В СЛЕДУЮЩЕМ "
-            "ФИКСИРОВАННОМ ПОРЯДКЕ: "
-            "1) ОПИСАНИЕ; "
-            "2) БРЕНДЫ (перечень и краткое описание); "
-            "3) ЧИСЛЕННОСТЬ СОТРУДНИКОВ; "
-            "4) ПРОИЗВОДСТВЕННЫЕ МОЩНОСТИ (площадь, объёмы по годам/дням); "
-            "5) ИНВЕСТИЦИИ И ПРОЕКТЫ РАСШИРЕНИЯ (сумма, планы, рынки); "
-            "6) АДРЕС HQ И ПРОИЗВОДСТВЕННЫХ ПЛОЩАДОК; "
-            "7) СОЦИАЛЬНЫЕ СЕТИ (ВК, Facebook, LinkedIn, YouTube, Одноклассники, сайт); "
-            "8) ИСТОРИЯ И КЛЮЧЕВЫЕ СОБЫТИЯ; "
-            "9) ПРИБЫЛЬ/ОБЪЁМЫ ПРОДУКЦИИ; "
-            "10) КОНКУРЕНТЫ (названия, сайты, краткое описание); "
-            "11) УЧАСТИЕ В ФОРУМАХ/НОВОСТЯХ/РЕЙТИНГАХ. "
-            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ПОЛНЫЙ URL). "
-            "ЕСЛИ ДАННЫХ НЕТ — ПИШИ 'не найдено'. "
-            "НЕ ДУБЛИРУЙ ИНФОРМАЦИЮ И НЕ ВЫДУМЫВАЙ ФАКТОВ. "
-            "НЕ ИСПОЛЬЗУЙ MARKDOWN, НЕ УКАЗЫВАЙ ВЫРУЧКУ (REVENUE) НИ В КАКОМ ВИДЕ, НО МОЖНО УКАЗЫВАТЬ ПРИБЫЛЬ ПО ПРОДУКТАМ.\n"
+            "ТЫ — ВЫСОКОКВАЛИФИЦИРОВАННЫЙ АНАЛИТИК РЫНКОВ. СОСТАВЬ СТРУКТУРИРОВАННЫЙ АНАЛИТИЧЕСКИЙ ОТЧЁТ О КОМПАНИИ В ФОРМЕ ПОСЛЕДОВАТЕЛЬНЫХ АБЗАЦЕВ ПО СЛЕДУЮЩИМ ТЕМАТИЧЕСКИМ БЛОКАМ: "
+            "1) ОПИСАНИЕ (миссия, род деятельности, сфера), "
+            "2) ОБЩАЯ ИНФОРМАЦИЯ (юридический статус, дата и место основания, штаб-квартира), "
+            "3) ПАРТНЁРСТВА (ключевые альянсы и сотрудничества), "
+            "4) НАПРАВЛЕНИЯ (ключевые линии бизнеса и инициативы), "
+            "5) ИСТОРИЯ (вехи развития, ключевые события), "
+            "6) ЦИФРЫ (объёмы производства, доля рынка, активы и др. — КРОМЕ ВЫРУЧКИ), "
+            "7) ПРОДУКТЫ (основные категории товаров и услуг), "
+            "8) ГЕОГРАФИЯ (рынки присутствия, регионы продаж, производственные мощности), "
+            "9) СОТРУДНИКИ (численность персонала, ключевые фигуры, корпоративная культура), "
+            "10) УНИКАЛЬНОСТЬ (конкурентные преимущества, отличительные черты), "
+            "11) ВЫВОДЫ (оценка позиции на рынке, перспективы, вызовы). "
+            "ПОСЛЕ КАЖДОГО ФАКТА ОБЯЗАТЕЛЬНО УКАЗЫВАЙ ПОДТВЕРЖДЁННУЮ ССЫЛКУ-ИСТОЧНИК В КРУГЛЫХ СКОБКАХ (ФОРМАТ: ПОЛНЫЙ URL). "
+            "В КОНЦЕ ОТДЕЛЬНО ПЕРЕЧИСЛИ ОФИЦИАЛЬНЫЕ СТРАНИЦЫ КОМПАНИИ В VK, FACEBOOK, LINKEDIN, YOUTUBE, OK.RU И НА ЕЁ САЙТЕ, "
+            "УКАЗЫВАЯ ПОЛНЫЙ URL КАЖДОЙ НАЙДЕННОЙ СЕТИ. "
+            "НЕ ИСПОЛЬЗУЙ Markdown, НЕ УКАЗЫВАЙ ВЫРУЧКУ НИ В КАКОМ ВИДЕ.\n"
         )
         
         return await _gpt(
@@ -417,15 +393,18 @@ class RAG:
     # ---------- orchestrator -------------------------------------------
     async def _run_async(self):
         # paralell: сниппет + детальный паспорт сайта
-        site_ctx_task = asyncio.create_task(self._site_ctx())
-        site_pass_task = (
-            asyncio.create_task(asyncio.to_thread(_site_passport_sync, self.website))
-            if self.website else None
-        )
+        site_ctx_task  = asyncio.create_task(self._site_ctx())
+        site_pass_task = None
+        if self.website:
+            # ▸ стало: просто уходим в отдельный поток без внешнего тай-аута
+            site_pass_task = None
+            if self.website:
+                site_pass_task = asyncio.create_task(
+                    asyncio.to_thread(_site_passport_sync, self.website)
+                )
         
 
         queries, snippets, hist = [], [], ""
-        news_snippets: list[tuple[str, str]] = []
         async with aiohttp.ClientSession() as s:
             for _ in range(self.steps):
                 ql = await self._queries(hist)
@@ -435,19 +414,6 @@ class RAG:
                 res = await asyncio.gather(*[_google(s, q, self.snips) for q in ql])
                 snippets += sum(res, [])
                 hist = f"\nСниппетов: {len(snippets)}"
-
-            news_domains = [
-                "rbc.ru",
-                "kommersant.ru",
-                "vedomosti.ru",
-                "tass.ru",
-                "forbes.ru",
-            ]
-            news_queries = [f'site:{d} "{self.company}"' for d in news_domains]
-            queries += news_queries
-            res = await asyncio.gather(*[_google(s, q, self.snips) for q in news_queries])
-            news_snippets = sum(res, [])
-            snippets += news_snippets
 
         site_ctx  = await site_ctx_task
         site_pass = await site_pass_task if site_pass_task else ""
@@ -508,7 +474,6 @@ class RAG:
             "summary":     summary,
             "queries":     queries,
             "snippets":    snippets,
-            "news_snippets": news_snippets,
             "site_ctx":    site_ctx,
             "site_pass":   site_pass,
             "company_doc": company_doc_txt   # ← новый ключ (если нужен во фронте)
