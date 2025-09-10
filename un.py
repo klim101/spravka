@@ -773,7 +773,7 @@ class FastLeadersInterviews:
         return FastLeadersInterviews(name, website=website, market=market, company_info=company_info).run()
 
     def _safe_div(a, b):
-    try:
+        try:
         if a is None or b in (None, 0):
             return None
         return a / b
