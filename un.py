@@ -53,6 +53,16 @@ CACHE_FILE = Path("google_cache.pkl")
 GOOGLE_CACHE: dict = {}
 QUERY_HISTORY: list = []
 
+def _safe_div(a: float | None, b: float | None) -> float | None:
+    if a is None or b in (None, 0):
+        return None
+    try:
+        return a / b
+    except ZeroDivisionError:
+        return None
+
+
+
 
 import functools
 
@@ -1207,14 +1217,10 @@ def run_ai_insight_tab() -> None:
                             line  = fio
                             if inn:
                                 line += f" (ИНН {inn}"
-
                                 if share is not None:
                                     line += f", доля {float(share):.1f}%)"
                                 else:
                                     line += ")"
-            
-                                line += f", доля {float(share):.1f}%)" if share is not None else ")"
-  
                             out.append(line)
                     return [s for s in out if s]
                 # fallback
