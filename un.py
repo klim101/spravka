@@ -53,6 +53,27 @@ CACHE_FILE = Path("google_cache.pkl")
 GOOGLE_CACHE: dict = {}
 QUERY_HISTORY: list = []
 
+
+import functools
+
+@st.cache_data(ttl=3_600)
+def ck_call(endpoint: str, inn: str):
+    url = f"https://api.checko.ru/v2/{endpoint}"
+    r = requests.get(url, params={"key": KEYS["CHECKO_API_KEY"], "inn": inn}, timeout=10)
+    r.raise_for_status()
+    return r.json()["data"]
+
+ck_company = functools.partial(ck_call, "company")
+ck_fin     = functools.partial(ck_call, "finances")
+
+@st.cache_data(ttl=86_400, show_spinner="🔎 Ищем руководителей и интервью…")
+def get_leaders_rag(company: str, *, website: str = "", market: str = "", company_info: dict | None = None):
+    return FastLeadersInterviews(company=company, website=website, market=market, company_info=company_info).run()
+
+
+
+
+
 def _save_cache():
     try:
         CACHE_FILE.write_bytes(pickle.dumps({"cache": GOOGLE_CACHE, "history": QUERY_HISTORY}))
@@ -1723,7 +1744,7 @@ def run_advance_eye_tab() -> None:
         else:
             st.warning(f"Ошибка запроса: {res.get('error', 'пустой ответ')}")
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────а
 # 3. Инициализируем состояние (один раз за сессию)
 # ─────────────────────────────────────────────────────────
 st.session_state.setdefault("ai_prog", None)   # float 0…1 или None
