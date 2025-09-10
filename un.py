@@ -770,7 +770,7 @@ class FastLeadersInterviews:
       • ИНН / inn
     """
     def get_leaders_rag(name: str, *, website: str = "", market: str = "", company_info: dict | None = None):
-    return FastLeadersInterviews(name, website=website, market=market, company_info=company_info).run()
+        return FastLeadersInterviews(name, website=website, market=market, company_info=company_info).run()
 
     def _safe_div(a, b):
     try:
