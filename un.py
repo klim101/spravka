@@ -19,7 +19,7 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 import openai
-from typing import List, Dict, Any, Tuple, Callable
+from typing import List, Dict, Any, Tuple
 import json
 import streamlit as st
 from collections import defaultdict
@@ -40,118 +40,6 @@ KEYS = {
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
-
-# доступные отраслевые группы
-GROUPS = ["Industrials", "Consumer", "O&G", "M&M", "Retail",
-          "Logistics", "FIG", "Services", "Agro", "TMT"]
-
-# дополнительные шаблоны запросов по отраслям
-GROUP_QUERY_TEMPLATES: dict[str, list[Callable[[str], str]]] = {
-    "Industrials": [
-        lambda c: f'"{c}" объём производства',
-        lambda c: f'"{c}" производственная мощность',
-        lambda c: f'"{c}" фабрика',
-        lambda c: f'"{c}" логистика',
-        lambda c: f'"{c}" оборудование',
-        lambda c: f'"{c}" r&d',
-        lambda c: f'"{c}" патенты',
-        lambda c: f'"{c}" сертификат ISO',
-        lambda c: f'"{c}" список оборудования',
-        lambda c: f'"{c}" виды продукции',
-    ],
-    "Consumer": [
-        lambda c: f'"{c}" бренды',
-        lambda c: f'"{c}" логотип',
-        lambda c: f'"{c}" целевая аудитория',
-    ],
-    "O&G": [
-        lambda c: f'"{c}" объём добычи',
-        lambda c: f'"{c}" переработка',
-        lambda c: f'"{c}" запасы',
-    ],
-    "M&M": [
-        lambda c: f'"{c}" объём добычи',
-        lambda c: f'"{c}" запасы',
-    ],
-    "Retail": [
-        lambda c: f'"{c}" количество магазинов',
-        lambda c: f'"{c}" площадь магазинов',
-        lambda c: f'"{c}" квадратные метры',
-    ],
-    "Logistics": [
-        lambda c: f'"{c}" парк',
-        lambda c: f'"{c}" объём грузов',
-        lambda c: f'"{c}" объём пассажиров',
-    ],
-    "FIG": [
-        lambda c: f'"{c}" баланс',
-        lambda c: f'"{c}" чистые активы',
-        lambda c: f'"{c}" процентный доход',
-        lambda c: f'"{c}" комиссионный доход',
-        lambda c: f'"{c}" доход от страхования',
-    ],
-    "Services": [
-        lambda c: f'"{c}" gmv услуг',
-        lambda c: f'"{c}" проникновение',
-    ],
-    "Agro": [
-        lambda c: f'"{c}" площадь земли',
-        lambda c: f'"{c}" регион',
-        lambda c: f'"{c}" культуры',
-        lambda c: f'"{c}" животные',
-        lambda c: f'"{c}" объём производства',
-        lambda c: f'"{c}" склады',
-        lambda c: f'"{c}" элеваторы',
-    ],
-    "TMT": [
-        lambda c: f'"{c}" количество пользователей',
-        lambda c: f'"{c}" ежедневные просмотры',
-        lambda c: f'"{c}" проникновение',
-        lambda c: f'"{c}" операционные показатели',
-        lambda c: f'"{c}" gmv',
-        lambda c: f'"{c}" gbv',
-        lambda c: f'"{c}" количество просмотров',
-    ],
-}
-
-# подсказки для summary по отраслям
-GROUP_SUMMARY_HINTS: dict[str, str] = {
-    "Industrials": (
-        "учитывай объём производства и capacity, расположение фабрики, "
-        "логистику, описание оборудования, наличие R&D и патентов, "
-        "сертификаты ISO, список оборудования с характеристиками и виды продукции"
-    ),
-    "Consumer": (
-        "добавляй описание брендов с логотипами и целевую аудиторию"
-    ),
-    "O&G": (
-        "указывай объём добычи, переработки, запасы и ресурсы"
-    ),
-    "M&M": (
-        "указывай объём добычи, запасы и ресурсы"
-    ),
-    "Retail": (
-        "приводи количество и площадь магазинов, общую площадь в кв. метрах"
-    ),
-    "Logistics": (
-        "описывай парк и объёмы грузов или пассажиров"
-    ),
-    "FIG": (
-        "добавляй баланс, чистые активы, процентный и комиссионный доход, "
-        "доход от страхования и прочих финансовых продуктов"
-    ),
-    "Services": (
-        "указывай GMV услуг и уровень проникновения"
-    ),
-    "Agro": (
-        "описывай объём земли и регион, выращиваемые культуры или животных, "
-        "объёмы производства, наличие складов и элеваторов"
-    ),
-    "TMT": (
-        "приводи количество пользователей, ежедневные просмотры, проникновение, "
-        "релевантные операционные и крупные финансовые показатели"
-    ),
-}
 
 
 # In[ ]:
@@ -392,8 +280,7 @@ class RAG:
     def __init__(self, company: str, *, website: str = "", market: str = "",
                  years=(2022, 2023, 2024), country: str = "Россия",
                  steps: int = 3, snips: int = 4,
-                 llm_model: str = "gpt-4o-mini", company_info: dict | None = None,
-                 group: str = ""):
+                 llm_model: str = "gpt-4o-mini",company_info: dict | None = None,):
         self.company   = company.strip()
         self.website   = website.strip()
         self.market    = market.strip()
@@ -403,7 +290,6 @@ class RAG:
         self.snips     = snips
         self.llm_model = llm_model
         self.company_info = company_info or {}
-        self.group = group.strip()
 
     # ---------- site-snippet из Google ---------------------------------
     async def _site_ctx(self) -> str:
@@ -449,8 +335,6 @@ class RAG:
             "4. СКОМБИНИРОВАТЬ их с операторами.\n"
             "5. ВЫВЕСТИ строки `QUERY:`.\n"
         )
-        if self.group:
-            sys += f"КОМПАНИЯ ПРИНАДЛЕЖИТ К СЕКТОРУ {self.group}. ДОБАВЬ ЗАПРОСЫ, УЧИТЫВАЮЩИЕ ОСОБЕННОСТИ ЭТОЙ ОТРАСЛИ.\n"
         raw = await _gpt(
             [{"role": "system", "content": sys},
              {"role": "user",   "content": f'base={base}{hist}'}],
@@ -458,7 +342,7 @@ class RAG:
         ql = re.findall(r"QUERY:\s*(.+)", raw, flags=re.I)
 
         if not hist:
-            base_templates = [
+            templates = [
                 f'"{self.company}" описание',
                 f'"{self.company}" бренды',
                 f'"{self.company}" сотрудники',
@@ -475,8 +359,6 @@ class RAG:
                 f'форум "{self.company}"',
                 f'site:news.* "{self.company}"',
             ]
-            group_templates = [tpl(self.company) for tpl in GROUP_QUERY_TEMPLATES.get(self.group, [])]
-            templates = base_templates + group_templates
             ql = templates + [q for q in ql if q not in templates]
 
         # ─── целевые соцсети и официальный сайт ──────────────────────
@@ -513,10 +395,6 @@ class RAG:
             "НЕ ДУБЛИРУЙ ИНФОРМАЦИЮ И НЕ ВЫДУМЫВАЙ ФАКТОВ. "
             "НЕ ИСПОЛЬЗУЙ MARKDOWN, НЕ УКАЗЫВАЙ ВЫРУЧКУ (REVENUE) НИ В КАКОМ ВИДЕ, НО МОЖНО УКАЗЫВАТЬ ПРИБЫЛЬ ПО ПРОДУКТАМ.\n"
         )
-        if self.group:
-            hint = GROUP_SUMMARY_HINTS.get(self.group, "")
-            if hint:
-                sys += f"КОМПАНИЯ ОТНОСИТСЯ К СЕКТОРУ {self.group}. {hint}.\n"
         
         return await _gpt(
             [{"role": "system", "content": sys},
@@ -1181,12 +1059,11 @@ def run_ai_insight_tab() -> None:
     st.title("📊 AI Company Insight")
     st.markdown("Введите данные (каждая компания — в отдельной строке).")
     
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1: inns_raw  = st.text_area("ИНН")          # ✅ без key=* — нам не нужны две копии
     with c2: names_raw = st.text_area("Название")
     with c3: mkts_raw  = st.text_area("Рынок")
     with c4: sites_raw = st.text_area("Сайт")
-    with c5: group_sel = st.selectbox("Группа", GROUPS)
     
     aggregate_mode = st.checkbox("🧮 Суммировать финансы по всем ИНН")
     
@@ -1200,7 +1077,6 @@ def run_ai_insight_tab() -> None:
             names  = split(names_raw)
             mkts   = split(mkts_raw)
             sites  = split(sites_raw)
-            groups = [group_sel] * len(inns)
             
             # ---------- валидация ----------
             if not inns:
@@ -1211,7 +1087,6 @@ def run_ai_insight_tab() -> None:
                 if len(names) == 1 and len(inns) > 1:  names *= len(inns)
                 if len(mkts)  == 1 and len(inns) > 1:  mkts  *= len(inns)
                 if len(sites) == 1 and len(inns) > 1:  sites *= len(inns)
-                if len(groups) == 1 and len(inns) > 1: groups *= len(inns)
             
                 # теперь всё либо пустое, либо совпадает по длине
                 for lst, lbl in [(names, "Название"), (mkts, "Рынок")]:
@@ -1225,15 +1100,12 @@ def run_ai_insight_tab() -> None:
                     st.error("Число строк во всех трёх полях должно совпадать."); st.stop()
                 if sites and len(sites) != len(inns):
                     st.error("Число строк «Сайт» должно совпадать с числом ИНН."); st.stop()
-                if groups and len(groups) != len(inns):
-                    st.error("Число строк «Группа» должно совпадать с числом ИНН."); st.stop()
             
             # ---------- выравниваем длины списков ----------
             pad = lambda lst: lst if lst else [""] * len(inns)
             names_full = pad(names)
             mkts_full  = pad(mkts)
             sites_full = pad(sites)
-            groups_full = pad(groups)
             YEARS = ["2022", "2023", "2024"]
             df_companies = pd.DataFrame([ck_company(i) for i in inns])
 
@@ -1449,7 +1321,7 @@ def run_ai_insight_tab() -> None:
                     # --- единый RAG-пайплайн (Google-сниппеты + сайт) ---------------------
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(first_name, website=first_site, market=first_mkt, group=groups_full[0]).run()
+                        doc = RAG(first_name, website=first_site, market=first_mkt).run()
                     
                     # ----------- вывод основного отчёта -----------------------------------
                     html_main = _linkify(doc["summary"]).replace("\n", "<br>")
@@ -1661,7 +1533,7 @@ def run_ai_insight_tab() -> None:
                     # ────── Описание компании (Google + сайт) ───────────────────────────
                     st.subheader("📝 Описание компании")
                     with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(name, website=site, market=mkt, group=groups_full[idx]).run()     # ← новая переменная
+                        doc = RAG(name, website=site, market=mkt).run()     # ← новая переменная
                     
                     # основной отчёт
                     main_html = _linkify(doc["summary"]).replace("\n", "<br>")
