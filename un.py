@@ -1844,19 +1844,22 @@ def run_ai_insight_tab() -> None:
                     
                     else:
                         with st.spinner("Генерируем INVEST SNAPSHOT…"):
-                            company_info_first = {...}
-                            inv = get_invest_snapshot_enriched(
-                                first_name, site_hint=first_site,
-                                company_info=company_info_first, market=first_mkt,
-                                model="sonar", recency=None, max_tokens=1500
+                            inv = get_invest_snapshot(
+                                first_name,
+                                site_hint=first_site,
+                                model="sonar",
+                                recency=None,
+                                max_tokens=1500
                             )
-                        
-                        st.markdown(
-                            f"<div ...>{inv['md']}</div>",
-                            unsafe_allow_html=True,
-                        )
-                        doc = {"summary": inv["md"], "mode": "invest_snapshot"}
-                        
+                            # вырезаем раздел «Интервью» из описания
+                            inv_clean = strip_interviews_section(inv["md"])
+                            # делаем URL кликабельными (внутри div можно HTML)
+                            inv_html = linkify_keep_url(inv_clean)
+                            st.markdown(
+                                f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv_html}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            doc = {"summary": inv_clean, "mode": "invest_snapshot"}
                         with st.expander("🔧 Отладка (сырой ответ)"):
                             st.text(inv.get("raw") or "—")
                     
@@ -1911,24 +1914,33 @@ def run_ai_insight_tab() -> None:
                         "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
                     }
                     
-                    # 1) Короткий дайджест (как было)
                     with st.spinner("Ищем интервью (Checko → интернет)…"):
                         dual = build_dual_interviews_from_v2(
                             cmp_name, company_info=company_info_row, site_hint=site, market=mkt
                         )
                     
-                    fio_checko = ", ".join(dual["names_checko"]) or "нет данных"
-                    fio_inet   = ", ".join(dual["names_inet"])   or "нет данных"
+                    fio_checko = ", ".join(dual.get("names_checko") or []) or "нет данных"
+                    fio_inet   = ", ".join(dual.get("names_inet") or [])   or "нет данных"
+                    
+                    digest_checko = sanitize_invest(dual.get("digest_checko") or "нет данных")
+                    digest_inet   = sanitize_invest(dual.get("digest_inet") or "нет данных")
+                    
+                    # делаем ссылки кликабельными:
+                    dig_checko_html = linkify_keep_url(digest_checko).replace("\n", "<br>")
+                    dig_inet_html   = linkify_keep_url(digest_inet).replace("\n", "<br>")
+                    
+                    block_checko = (f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4><div>{dig_checko_html}</div>"
+                                    if digest_checko.strip().lower() != "нет данных" else "")
+                    block_inet   = (f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4><div>{dig_inet_html}</div>"
+                                    if digest_inet.strip().lower() != "нет данных" else "")
                     
                     st.markdown(
                         f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
                         f"<p><b>ФИО (Checko):</b> {html.escape(fio_checko)}</p>"
                         f"<p><b>ФИО (интернет):</b> {html.escape(fio_inet)}</p>"
                         f"<hr style='border:none;border-top:1px solid #eee;margin:10px 0'>"
-                        f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4>"
-                        f"<div>{dual['digest_checko'].replace(chr(10), '<br>')}</div>"
-                        f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
-                        f"<div>{dual['digest_inet'].replace(chr(10), '<br>')}</div>"
+                        f"{block_checko}"
+                        f"{block_inet}"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -2088,17 +2100,14 @@ def run_ai_insight_tab() -> None:
                             site_hint=site,
                             model="sonar", recency=None, max_tokens=1500
                         )
-                    
-                    # вырезаем раздел «Интервью» из Markdown
-                    md_no_interv = _SEC_INTERV_RE.sub("", inv["md"]).strip()
-                    
-                    # делаем ссылки кликабельными и уважаем переносы
-                    html_main = linkify_keep_url(md_no_interv).replace("\n", "<br>")
-                    
-                    st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
-                        unsafe_allow_html=True,
-                    )
+                        inv_clean = strip_interviews_section(inv["md"])
+                        inv_html  = linkify_keep_url(inv_clean)
+                        
+                        st.markdown(
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv_html}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        doc = {"summary": inv_clean, "mode": "invest_snapshot"}
 
                     
                     with st.expander("🔧 Отладка (сырой ответ)"):
@@ -2140,7 +2149,14 @@ def run_ai_insight_tab() -> None:
                     
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
+                    # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
+                    
+                    # собираем people из Checko для ТЕКУЩЕЙ компании (idx)
+                    company_info_row = {
+                        "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                        "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                    }
                     
                     with st.spinner("Ищем интервью (Checko → интернет)…"):
                         dual = build_dual_interviews_from_v2(
@@ -2148,20 +2164,31 @@ def run_ai_insight_tab() -> None:
                         )
                     
                     fio_checko = ", ".join(dual.get("names_checko") or []) or "нет данных"
-                    fio_inet   = ", ".join(dual.get("names_inet") or [])   or "нет данных"
+                    fio_inet   = ", ".join(dual.get("names_inet")   or []) or "нет данных"
                     
-                    dig_checko_html = linkify_keep_url(dual.get("digest_checko") or "нет данных").replace("\n", "<br>")
-                    dig_inet_html   = linkify_keep_url(dual.get("digest_inet")   or "нет данных").replace("\n", "<br>")
+                    # чистим запрещённые строки и готовим кликабельные ссылки
+                    digest_checko = sanitize_invest((dual.get("digest_checko") or "").strip()) or "нет данных"
+                    digest_inet   = sanitize_invest((dual.get("digest_inet")   or "").strip()) or "нет данных"
+                    
+                    dig_checko_html = linkify_keep_url(digest_checko).replace("\n", "<br>")
+                    dig_inet_html   = linkify_keep_url(digest_inet).replace("\n", "<br>")
+                    
+                    # показываем подзаголовки только если есть данные
+                    block_checko = (
+                        f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4><div>{dig_checko_html}</div>"
+                        if digest_checko.lower() != "нет данных" else ""
+                    )
+                    block_inet = (
+                        f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4><div>{dig_inet_html}</div>"
+                        if digest_inet.lower() != "нет данных" else ""
+                    )
                     
                     st.markdown(
                         f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
                         f"<p><b>ФИО (Checko):</b> {html.escape(fio_checko)}</p>"
                         f"<p><b>ФИО (интернет):</b> {html.escape(fio_inet)}</p>"
                         f"<hr style='border:none;border-top:1px solid #eee;margin:10px 0'>"
-                        f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4>"
-                        f"<div>{dig_checko_html}</div>"
-                        f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
-                        f"<div>{dig_inet_html}</div>"
+                        f"{block_checko}{block_inet}"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
