@@ -31,18 +31,35 @@ from functools import partial
 import threading
 import time
 import functools
+import ast
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
     "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
     "GOOGLE_CX":      st.secrets["GOOGLE_CX"],
     "CHECKO_API_KEY": st.secrets["CHECKO_API_KEY"],
-    "DYXLESS_TOKEN": st.secrets["DYXLESS_TOKEN"]
+    "DYXLESS_TOKEN": st.secrets["DYXLESS_TOKEN"],
+    "SONAR_API_KEY": st.secrets["SONAR_API_KEY"],
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 
 
-# In[ ]:
+# ── Общие константы (единые для всего файла)
+HEADERS = {"User-Agent": "Mozilla/5.0 (Win64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
+_URL_PAT = re.compile(r"https?://[^\s)<>\"']+", flags=re.I)
+
+# Две чёткие версии linkify, чтобы не конфликтовать:
+def linkify_as_word(text: str, label: str = "ссылка") -> str:
+    """Заменяет URL на <a>label</a> (краткая версия)."""
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return _URL_PAT.sub(lambda m: f'<a href="{html.escape(m.group(0))}" target="_blank" rel="noopener">{label}</a>', text)
+
+def linkify_keep_url(text: str) -> str:
+    """Заменяет URL на <a>сам URL</a> (полная версия)."""
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    return _URL_PAT.sub(lambda m: f'<a href="{html.escape(m.group(0))}" target="_blank" rel="noopener">{html.escape(m.group(0))}</a>', text)
 
 
 # ─────────────────── app.py ────────────────────
@@ -73,13 +90,6 @@ def _linkify(text) -> str:
     return _URL_PAT.sub(repl, text)
 
 
-
-def long_job(total: int, key: str):
-    """Долгая задача: пишет прогресс в st.session_state[key]"""
-    for i in range(total + 1):
-        time.sleep(1)                         # здесь ваша тяжёлая логика
-        st.session_state[key] = i / total     # от 0.0 до 1.0
-    st.session_state[key] = 1.0               # финализируем
 
 
 
@@ -266,6 +276,163 @@ def _site_passport_sync(url: str, *, max_chunk: int = 6_000) -> str:
     except Exception as exc:
         return f"[site passport error: {exc}]"
 
+# ╭─🧾  INVEST SNAPSHOT (cheap, 1 call) — адреса мощностей, соцсети, новости, интервью, конкуренты, headcount ─╮
+import json, requests, re
+from typing import Optional
+
+API_URL_INVEST = "https://api.perplexity.ai/chat/completions"
+
+class PPLXError(Exception):
+    ...
+
+def _pplx_call_invest(
+    prompt: str,
+    model: str = "sonar",            # дешёвая модель
+    recency: Optional[str] = None,   # None = широкий охват (5 лет)
+    temperature: float = 0.0,
+    max_tokens: int = 1500,
+    timeout: int = 60,
+) -> str:
+    key = (os.getenv("SONAR_API_KEY") or os.getenv("PPLX_API_KEY") or os.getenv("PERPLEXITY_API_KEY") or "").strip()
+    assert key.startswith("pplx-"), "Установи SONAR_API_KEY = pplx-..."
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [
+            {"role":"system","content":(
+                "Ты — аналитик M&A. Охват 5 лет. Строго факты из открытых источников. "
+                "Запрещено упоминать финансовые показатели (выручка, прибыль, EBITDA и т.п.), "
+                "ИНН/ОГРН и любые выводы на их основе. Можно упоминать имена владельцев/руководителей "
+                "ТОЛЬКО в контексте ссылок на их интервью. "
+                "Если данных по пункту нет — пиши 'нет данных'. Не повторяй одну и ту же информацию в разных разделах. "
+                "В конце укажи прямые URL источников."
+            )},
+            {"role":"user","content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if recency in {"hour","day","week","month","year"}:
+        payload["search_recency_filter"] = recency
+
+    r = requests.post(API_URL_INVEST, headers=headers, json=payload, timeout=timeout)
+    if r.status_code != 200:
+        try: err = r.json()
+        except Exception: err = {"error": r.text}
+        raise PPLXError(f"HTTP {r.status_code}: {json.dumps(err, ensure_ascii=False)[:900]}")
+    return r.json()["choices"][0]["message"]["content"]
+
+# фильтр запретных тем: финпоказатели и рег.номера (разрешаем владельцев только в интервью)
+_FORBIDDEN_INVEST = re.compile(
+    r"(\bвыручк|\bприбыл|\bebit(?:da)?\b|маржинал|рентабельн|финанс|\bинн\b|\bогрн\b|уставн\w*\s+капитал)",
+    re.IGNORECASE
+)
+
+def _dedup_lines_invest(text: str) -> str:
+    """Удалить точные повторы строк и повторяющиеся URL в строках, сохранить порядок."""
+    seen_lines, seen_urls, out = set(), set(), []
+    url_re = re.compile(r'https?://\S+')
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if not ln:
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        urls = url_re.findall(ln)
+        for u in urls:
+            if u in seen_urls:
+                ln = ln.replace(u, "")
+            else:
+                seen_urls.add(u)
+        ln = re.sub(r'\s{2,}', ' ', ln).strip()
+        if ln and ln not in seen_lines:
+            out.append(ln); seen_lines.add(ln)
+    cleaned = []
+    for i, ln in enumerate(out):
+        if ln == "" and (i == 0 or (i+1 < len(out) and out[i+1] == "")):
+            continue
+        cleaned.append(ln)
+    return "\n".join(cleaned).strip()
+
+def sanitize_invest(text: str) -> str:
+    """Убираем строки с финпоказателями/ИНН/ОГРН/уставным капиталом и чистим повторы."""
+    keep = []
+    for ln in text.splitlines():
+        if _FORBIDDEN_INVEST.search(ln):
+            continue
+        keep.append(ln)
+    return _dedup_lines_invest("\n".join(keep))
+
+def build_invest_prompt(company: str, site_hint: Optional[str] = None) -> str:
+    site = f"\nВозможный официальный сайт: {site_hint}." if site_hint else ""
+    return f"""
+Сделай структурированный отчёт по компании «{company}» на русском (охват: 5 лет).{site}
+Формат строго Markdown с заголовками уровня ### и короткими абзацами (без списков). Не дублируй факты между разделами.
+
+### Профиль
+1–2 предложения: что за компания, чем занимается (категории товаров/услуг), география. Если есть одноимённые фирмы — кратко укажи дизамбигуацию по профилю/сайту.
+
+### Бизнес-модель
+Как компания зарабатывает: каналы (собственные продажи/дистрибуция/опт/розница/маркетплейсы/дилеры), сервисные модели, подписки/сервисные контракты, интеграции. Без цифр и оценок — только явные формулировки из источников (если есть).
+
+### Активы и площадки
+Адреса всех выявленных объектов (офисы, склады, РЦ, магазины/ПВЗ). Площади (м²) и характеристики (кол-во РЦ/складов, собственные/арендованные) — только если прямо указано в источниках.
+
+### Производственные мощности и адреса
+Укажи наличие/отсутствие собственного производства. Приведи АДРЕСА производственных площадок/цехов/комбинатов и по каждой — что производится. Мощности (ед./м²/тонн/месяц) и степень загрузки — если раскрыты. Локации логистики и складской сети — кратко.
+
+### Инвестиционные планы и проекты
+Заявленные/ожидаемые инвестиции в новые линии/склады/РЦ/площадки; сроки и статус. Ссылки на первоисточники в скобках.
+
+### Клиенты и каналы сбыта
+B2B/B2C; сегменты/вертикали; продажи через сайт/магазины/маркетплейсы/дилеров; ориентиры по числу клиентов — только если публично и с источником.
+
+### Численность персонала
+Численность сотрудников/штата (если публично), дата/период и источник в скобках. Если только оценки — передай формулировку источника.
+
+### Конкуренты (Россия)
+Перечисли 5–12 релевантных российских конкурентов по профилю бизнеса; формат: Название (официальный сайт) в одном абзаце через запятую. Только компании, реально работающие в РФ за последние 5 лет.
+
+### Новости (последние 5 лет)
+Дай 5–12 значимых новостей о компании: «Заголовок» — URL (дата). В одном абзаце; не повторяй ссылки.
+
+### Интервью (владельцы/руководство)
+Дай 3–8 релевантных интервью/публичных разговоров: «Спикер — Заголовок/тема» — URL (дата). В одном абзаце. Не раскрывай доли/структуру владения, только факт интервью.
+
+### Цифровые каналы и контакты
+Сайт (если есть), e-mail/телефоны (если публично), ВСЕ найденные соцсети (VK, Telegram, YouTube, RuTube, OK, Instagram*, Facebook*, LinkedIn), каталоги/карты (2ГИС, Яндекс.Карты, Google Maps) — приводи ПРЯМЫЕ URL.
+
+### Источники
+Перечисли все использованные прямые URL через запятую, без нумерации.
+
+Требования:
+— Не указывай финансовые метрики (выручка/прибыль/EBITDA и т.п.), ИНН/ОГРН/уставный капитал и выводы на их основе.
+— Строго избегай повторов между разделами и повторов ссылок.
+— Только подтверждаемые факты из открытых источников; если данных нет — 'нет данных'.
+""".strip()
+
+def invest_snapshot(company: str, site_hint: Optional[str] = None,
+                    model: str = "sonar", recency: Optional[str] = None,
+                    max_tokens: int = 1500) -> str:
+    prompt = build_invest_prompt(company, site_hint=site_hint)
+    raw = _pplx_call_invest(prompt, model=model, recency=recency, max_tokens=max_tokens)
+    return sanitize_invest(raw)
+
+@st.cache_data(ttl=86_400, show_spinner="📝 Собираем описание компании…")
+def get_invest_snapshot(company: str,
+                        site_hint: Optional[str] = None,
+                        model: str = "sonar",
+                        recency: Optional[str] = None,
+                        max_tokens: int = 1500) -> dict:
+    """
+    Возвращает dict: {'md': markdown_text, 'raw': raw_text_for_debug}
+    """
+    try:
+        md = invest_snapshot(company, site_hint=site_hint, model=model, recency=recency, max_tokens=max_tokens)
+        return {"md": md, "raw": md}
+    except PPLXError as e:
+        return {"md": f"_Не удалось получить INVEST SNAPSHOT: {e}_", "raw": ""}
+# ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 class RAG:
@@ -645,6 +812,214 @@ def get_market_rag(market):
     return FastMarketRAG(market).run()
 
 
+# ╭─🧾  MARKET EVIDENCE (Perplexity) ───────────────────────────────╮
+#   • Абзацы-источники + финальная сводка + 2 блока "СТРУКТУРА"
+#   • Синхронный requests-вызов Perplexity, аккуратный вывод в Streamlit
+# ╰────────────────────────────────────────────────────────────────╯
+import os
+import re
+import json
+import requests
+import streamlit as st
+from typing import Optional, Tuple, Dict
+
+API_URL_PPLX = "https://api.perplexity.ai/chat/completions"
+
+
+class PPLXError(Exception):
+    pass
+
+
+# Слова, которые не выводим (юр-сущности)
+_FORBIDDEN = re.compile(r"(акционер|владельц|бенефициар|инн|огрн)", re.IGNORECASE)
+
+
+def _sanitize_evidence(text: str) -> str:
+    """Фильтрует запрещённые строки и чистит лишние пустые."""
+    lines, out, blank = [], [], False
+    for ln in (text or "").splitlines():
+        if _FORBIDDEN.search(ln):
+            continue
+        lines.append(ln)
+    for ln in lines:
+        if ln.strip() == "":
+            if not blank:
+                out.append("")
+            blank = True
+        else:
+            out.append(ln.rstrip())
+            blank = False
+    return "\n".join(out).strip()
+
+
+def _get_pplx_key() -> str:
+    key = (os.getenv("SONAR_API_KEY") or os.getenv("PPLX_API_KEY") or os.getenv("PERPLEXITY_API_KEY") or "").strip()
+    if (not key.startswith("pplx-")) or (len(key) < 40) or key.endswith("..."):
+        raise PPLXError("Перепроверь Perplexity API key: должен начинаться с 'pplx-' и быть длинным (обычно >40 символов).")
+    return key
+
+
+def _call_pplx(
+    prompt: str,
+    *,
+    model: str = "sonar",
+    recency: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = 1800,
+    timeout: int = 60,
+) -> str:
+    headers = {
+        "Authorization": f"Bearer {_get_pplx_key()}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "adv-market-evidence/1.1",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты — аналитик рынков. Отвечай строго фактологично, с ПРЯМЫМИ URL. "
+                    "НЕ упоминай владельцев/акционеров/бенефициаров, ИНН/ОГРН."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if recency in {"hour", "day", "week", "month", "year"}:
+        payload["search_recency_filter"] = recency
+
+    r = requests.post(API_URL_PPLX, headers=headers, json=payload, timeout=timeout)
+    if r.status_code != 200:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text[:800]}
+        raise PPLXError(f"HTTP {r.status_code}: {json.dumps(err, ensure_ascii=False)[:800]}")
+    data = r.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def build_market_evidence_prompt(
+    market: str,
+    country: str = "Россия",
+    years_force: tuple = (2021, 2022, 2023, 2024),
+    min_sources: int = 6,
+) -> str:
+    years_txt = ", ".join(str(y) for y in years_force)
+    # ДВА ЯВНЫХ ЗАВЕРШАЮЩИХ FENCED-БЛОКА: ```text ... ```
+    return f"""
+Собери "evidence" по рынку «{market}» (страна: {country}) из разных ОТКРЫТЫХ источников.
+
+ФОРМАТ ОТВЕТА — СТРОГО ТЕКСТ С АБЗАЦАМИ (БЕЗ СПИСКОВ/ТАБЛИЦ/CSV):
+— Каждый НОВЫЙ АБЗАЦ посвящён ОДНОМУ ресурсу (источнику): начинай так — «Источник: <издатель/название>, <год/дата>, URL: <прямой_линк>.»
+— Внутри абзаца НЕ используй маркеры. Пиши компактно, но включай ВСЕ найденные ЧИСЛА по рынку с единицами:
+   • годовые объёмы рынка в деньгах (предпочтительно ₽; если только $, всё равно включай и помечай как $);
+   • годовые NATURAL-объёмы (шт., м², т, посещения и т.п.), если есть;
+   • если есть сегменты/регионы — кратко добавь ключевые цифры.
+— По ГОДАМ {years_txt} старайся дать значения, если у источника они есть; если нет — явно напиши «за {years_txt} у источника: нет данных».
+— У КАЖДОГО факта — ПРЯМОЙ URL в этом же абзаце.
+— Минимум источников: {min_sources}. Разные домены/издатели (новости/аналитика/отчёты/госстат/профильные медиа).
+
+Заключительный абзац (последний):
+— Сформируй общую картину по найденным РЯДАМ И ПРОГНОЗАМ: перечисли, какие серии годовых значений мы получили (кто издатель/валюта/периметр), выстрой ХРОНОЛОГИЮ 2021→2024 и прогнозы (с единицами и ссылками), отметь расхождения (baseline vs альтернативы) и ограничения.
+
+СТРУКТУРА (сводная матрица; ДОБАВЬ ПОСЛЕ заключительного абзаца) — ДВА fenced-блока:
+1) Деньги:
+```text
+Источник | Период 1 | Период 2 | Период 3 | ...
+<краткое_название_источника> | <YYYY>: <число> <валюта/масштаб> | <YYYY>: <число> <валюта/масштаб> | ...
+2) Натуральные:
+Источник | Период 1 | Период 2 | Период 3 | ...
+<краткое_название_источника> | <YYYY>: <число> <ед.изм.> | <YYYY>: <число> <ед.изм.> | ...
+[если у источника нет натуральных оценок — укажи «нет данных» одной ячейкой]
+Требования к стилю:
+— Только абзацы и два завершающих fenced-блока ```text, без списков/нумерации/таблиц/CSV.
+— Единицы и валюта всегда рядом с числом (например, «млрд ₽», «$ млн», «тыс. посещений», «м²»).
+— Не выдумывай числа — только подтверждаемые факты с ПРЯМЫМИ URL.
+— Без упоминания владельцев/акционеров/ИНН/ОГРН.
+""".strip()
+
+def market_evidence_report(
+    market: str,
+    country: str = "Россия",
+    min_sources: int = 6,
+    model: str = "sonar",
+    recency: Optional[str] = None,
+    max_tokens: int = 1800,
+) -> str:
+    assert isinstance(min_sources, int) and 3 <= min_sources <= 15, "min_sources ∈ [3, 15]"
+    prompt = build_market_evidence_prompt(market, country=country, min_sources=min_sources)
+    raw = _call_pplx(prompt, model=model, recency=recency, max_tokens=max_tokens)
+    return _sanitize_evidence(raw)
+
+
+def _split_evidence_blocks(raw_text: str) -> Tuple[str, str, str]:
+    """
+    Возвращает (plain_text_without_code, money_block, natural_block).
+    Ищем два fenced-блока: text ...
+    """
+    if not raw_text:
+        return "", "", ""
+    code_blocks = re.findall(r"text\s*(.*?)\s*", raw_text, flags=re.S | re.I)
+    money_block = code_blocks[0].strip() if len(code_blocks) >= 1 else ""
+    natural_block = code_blocks[1].strip() if len(code_blocks) >= 2 else ""
+    # Вырезаем найденные блоки из основного текста
+    plain = raw_text
+    for blk in code_blocks[:2]:
+        plain = plain.replace(f"text\n{blk}\n", "")
+        plain = plain.replace(f"text\r\n{blk}\r\n", "")
+    return plain.strip(), money_block, natural_block
+
+
+def _linkify(text: str) -> str:
+    """
+    Заменяет http/https ссылки на кликабельные <a>.
+    Не трогаем остальной HTML.
+    """
+    url_re = re.compile(r"(https?://[^\s<>)\"']+)")
+    return url_re.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', text)
+
+
+@st.cache_data(ttl=86_400, show_spinner="🔎 Собираем рыночные EVIDENCE…")
+def get_market_evidence(
+    market: str,
+    country: str = "Россия",
+    min_sources: int = 6,
+    model: str = "sonar",
+    recency: Optional[str] = None,
+    max_tokens: int = 1800,
+) -> Dict[str, str]:
+    """
+    Streamlit-кэш: возвращает dict с:
+    • text_html — весь текст (абзацы-источники + финальный абзац), ссылки кликабельны
+    • money_block / natural_block — содержимое двух матриц для st.code(..., language="text")
+    • raw_text — исходный текст (для отладки)
+    """
+    try:
+        raw = market_evidence_report(
+            market=market,
+            country=country,
+            min_sources=min_sources,
+            model=model,
+            recency=recency,
+            max_tokens=max_tokens,
+        )
+    except PPLXError as e:
+        return {
+            "text_html": f"<i>Не удалось получить MARKET EVIDENCE: {str(e)}</i>",
+            "money_block": "",
+            "natural_block": "",
+            "raw_text": "",
+        }
+
+    plain, money, natural = _split_evidence_blocks(raw)
+    text_html = linkify_keep_url(plain).replace("\n", "<br>")
+
+    return {"text_html": text_html, "money_block": money, "natural_block": natural, "raw_text": raw}
 
 
 
@@ -866,7 +1241,7 @@ class FastLeadersInterviews:
     
         # --- ③ финальное HTML -----------------------------------------------
         body = "\n\n".join([part for part in (owners_block, contacts_block, digest) if part])
-        summary_html = _linkify(body)
+        summary_html = linkify_as_word(body)
     
         return {
             "summary":  summary_html,
@@ -1320,61 +1695,94 @@ def run_ai_insight_tab() -> None:
                     
                     # --- единый RAG-пайплайн (Google-сниппеты + сайт) ---------------------
                     st.subheader("📝 Описание компании")
-                    with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(first_name, website=first_site, market=first_mkt).run()
+                    desc_legacy = st.toggle("Legacy (Google/SiteRAG) description", value=False, key="desc_first")
                     
-                    # ----------- вывод основного отчёта -----------------------------------
-                    html_main = _linkify(doc["summary"]).replace("\n", "<br>")
-                    st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
-                        unsafe_allow_html=True,
-                    )
+                    if desc_legacy:
+                        with st.spinner("Генерируем описание (Legacy)…"):
+                            doc = RAG(first_name, website=first_site, market=first_mkt).run()
                     
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(doc["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        st.dataframe(
-                            pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
-                            use_container_width=True,
-                        )
-                    
-                    # ----------- отдельная плашка «Паспорт сайта» (если есть) --------------
-                    if doc.get("site_pass"):
-                        with st.expander("🌐 Паспорт сайта"):
-                            st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>"
-                                f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
-                                unsafe_allow_html=True,
-                            )
-                    else:
-                        st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
-                    
-                    # ----------- Рыночный отчёт -------------------------------------------
-                    if first_mkt:
-                        st.subheader("📈 Рыночный отчёт")
-                        with st.spinner("Собираем данные по рынку и генерируем анализ…"):
-                            mkt_res = get_market_rag(first_mkt)
-                    
-                        mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
+                        html_main = linkify_as_word(doc["summary"]).replace("\n", "<br>")
                         st.markdown(
-                            f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                            f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
                             unsafe_allow_html=True,
                         )
                     
                         with st.expander("⚙️ Запросы к Google"):
-                            for i, q in enumerate(mkt_res["queries"], 1):
+                            for i, q in enumerate(doc["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
                     
                         with st.expander("🔍 Сниппеты (top-15)"):
                             st.dataframe(
-                                pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
+                                pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
                                 use_container_width=True,
                             )
+                    
+                        if doc.get("site_pass"):
+                            with st.expander("🌐 Паспорт сайта"):
+                                st.markdown(
+                                    f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                    f"border-radius:8px;padding:18px;line-height:1.55'>"
+                                    f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        else:
+                            st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
+                    
+                    else:
+                        with st.spinner("Генерируем INVEST SNAPSHOT…"):
+                            inv = get_invest_snapshot(first_name, site_hint=first_site, model="sonar", recency=None, max_tokens=1500)
+                    
+                        # inv['md'] уже Markdown → без _linkify
+                        st.markdown(
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{inv['md']}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        with st.expander("🔧 Отладка (сырой ответ)"):
+                            st.text(inv["raw"] or "—")
+                    
+                    # (опционально) запоминаем «doc» для session_state
+                    doc = doc if desc_legacy else {"summary": inv["md"], "mode": "invest_snapshot"}
+                    
+                    # ----------- Рыночный отчёт (MARKET EVIDENCE) ------------------------
+                    if first_mkt:
+                        st.subheader("📈 Рыночный отчёт")
+                        legacy = st.toggle("Legacy (Google/GPT) mode", value=False, key="legacy_first")
+                    
+                        if legacy:
+                            with st.spinner("Собираем данные по рынку (Legacy)…"):
+                                mkt_res = get_market_rag(first_mkt)
+                            mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
+                            st.markdown(
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            with st.expander("⚙️ Запросы к Google"):
+                                for i, q in enumerate(mkt_res["queries"], 1):
+                                    st.markdown(f"**{i}.** {q}")
+                            with st.expander("🔍 Сниппеты (top-15)"):
+                                st.dataframe(
+                                    pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
+                                    use_container_width=True,
+                                )
+                        else:
+                            with st.spinner("Собираем MARKET EVIDENCE…"):
+                                ev = get_market_evidence(first_mkt, country="Россия", min_sources=8, recency=None)
+                            st.markdown(
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                f"border-radius:8px;padding:18px;line-height:1.55'>{ev['text_html']}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            st.caption("СТРУКТУРА по источникам — деньги:")
+                            st.code(ev["money_block"] or "—", language="text")
+                            st.caption("СТРУКТУРА по источникам — натуральные объёмы:")
+                            st.code(ev["natural_block"] or "—", language="text")
+                    
+                            # (опционально) отладка сырого ответа
+                            with st.expander("🔧 Отладка (сырой ответ)"):
+                                st.text(ev["raw_text"] or "—")
                     
                     # ----------- Руководители и интервью -----------------------------------
                     st.subheader("👥 Руководители и интервью")
@@ -1532,61 +1940,90 @@ def run_ai_insight_tab() -> None:
                     
                     # ────── Описание компании (Google + сайт) ───────────────────────────
                     st.subheader("📝 Описание компании")
-                    with st.spinner("Генерируем описание компании…"):
-                        doc = RAG(name, website=site, market=mkt).run()     # ← новая переменная
+                    desc_legacy_tab = st.toggle("Legacy (Google/SiteRAG) description", value=False, key=f"desc_{idx}")
                     
-                    # основной отчёт
-                    main_html = _linkify(doc["summary"]).replace("\n", "<br>")
-                    st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>{main_html}</div>",
-                        unsafe_allow_html=True
-                    )
+                    if desc_legacy_tab:
+                        with st.spinner("Генерируем описание (Legacy)…"):
+                            doc = RAG(name, website=site, market=mkt).run()
                     
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(doc["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        st.dataframe(
-                            pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
-                            use_container_width=True,
-                        )
-                    
-                    # 🌐 Паспорт сайта (если получился)
-                    if doc.get("site_pass"):
-                        with st.expander("🌐 Паспорт сайта"):
-                            st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>"
-                                f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
-                                unsafe_allow_html=True,
-                            )
-                    else:
-                        st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
-                    
-                    # ────── Рыночный отчёт ───────────────────────────────────────────────
-                    if mkt:
-                        st.subheader("📈 Рыночный отчёт")
-                        with st.spinner("Собираем данные по рынку и генерируем анализ…"):
-                            mkt_res = get_market_rag(mkt)
-                    
-                        mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
+                        main_html = _linkify(doc["summary"]).replace("\n", "<br>")
                         st.markdown(
-                            f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                            f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
-                            unsafe_allow_html=True,
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{main_html}</div>",
+                            unsafe_allow_html=True
                         )
                     
                         with st.expander("⚙️ Запросы к Google"):
-                            for i, q in enumerate(mkt_res["queries"], 1):
+                            for i, q in enumerate(doc["queries"], 1):
                                 st.markdown(f"**{i}.** {q}")
                     
                         with st.expander("🔍 Сниппеты (top-15)"):
                             st.dataframe(
-                                pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15),
+                                pd.DataFrame(doc["snippets"], columns=["URL", "Snippet"]).head(15),
                                 use_container_width=True,
                             )
+                    
+                        if doc.get("site_pass"):
+                            with st.expander("🌐 Паспорт сайта"):
+                                st.markdown(
+                                    f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                    f"border-radius:8px;padding:18px;line-height:1.55'>"
+                                    f"{_linkify(doc['site_pass']).replace(chr(10), '<br>')}</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        else:
+                            st.info("Паспорт сайта не получен (нет URL, ошибка загрузки или истек тай-аут).")
+                    
+                    else:
+                        with st.spinner("Генерируем INVEST SNAPSHOT…"):
+                            inv = get_invest_snapshot(name, site_hint=site, model="sonar", recency=None, max_tokens=1500)
+                    
+                        st.markdown(
+                            f"<div style='background:#F7F9FA;border:1px solid #ccc;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>{inv['md']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        with st.expander("🔧 Отладка (сырой ответ)"):
+                            st.text(inv["raw"] or "—")
+                    
+                    # для совместимости с session_state ниже
+                    doc = doc if desc_legacy_tab else {"summary": inv["md"], "mode": "invest_snapshot"}
+                    
+                    # ────── Рыночный отчёт (MARKET EVIDENCE) ─────────────────────────────
+                    if mkt:
+                        st.subheader("📈 Рыночный отчёт")
+                        legacy = st.toggle("Legacy (Google/GPT) mode", value=False, key=f"legacy_{idx}")
+                    
+                        if legacy:
+                            with st.spinner("Собираем данные по рынку (Legacy)…"):
+                                mkt_res = get_market_rag(mkt)
+                            mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
+                            st.markdown(
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            with st.expander("⚙️ Запросы к Google"):
+                                for i, q in enumerate(mkt_res["queries"], 1):
+                                    st.markdown(f"**{i}.** {q}")
+                            with st.expander("🔍 Сниппеты (top-15)"):
+                                df_leg = pd.DataFrame(mkt_res["snippets"], columns=["URL", "Snippet"]).head(15)
+                                st.dataframe(df_leg, use_container_width=True)
+                        else:
+                            with st.spinner("Собираем MARKET EVIDENCE…"):
+                                ev = get_market_evidence(mkt, country="Россия", min_sources=8, recency=None)
+                            st.markdown(
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
+                                f"border-radius:8px;padding:18px;line-height:1.55'>{ev['text_html']}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            st.caption("СТРУКТУРА по источникам — деньги:")
+                            st.code(ev["money_block"] or "—", language="text")
+                            st.caption("СТРУКТУРА по источникам — натуральные объёмы:")
+                            st.code(ev["natural_block"] or "—", language="text")
+                    
+                            with st.expander("🔧 Отладка (сырой ответ)"):
+                                st.text(ev["raw_text"] or "—")
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
