@@ -435,6 +435,198 @@ def get_invest_snapshot(company: str,
 # ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
+
+
+
+# ╭─👥 Интервью: обогащаем INVEST SNAPSHOT лицами из Checko (Sonar-only) ─╮
+#   • Этап 1 — интервью по ФИО из Checko
+#   • Этап 2 — если нет/мало ФИО → discovery ФИО через Sonar
+#   • Подмена секции "### Интервью (владельцы/руководство)" в готовом Markdown
+# Требует: _pplx_call_invest, sanitize_invest из блока INVEST SNAPSHOT
+# ╰───────────────────────────────────────────────────────────────────────╯
+import re, html
+from typing import Optional
+
+def _clean_person(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s*\(.*?\)\s*$", "", s)            # убираем хвост в скобках: (ИНН…, доля…)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s
+
+def _names_from_checko(company_info: dict | None) -> list[str]:
+    if not isinstance(company_info, dict):
+        return []
+    raw = []
+    for key in ("leaders_raw", "founders_raw"):
+        v = company_info.get(key) or []
+        if isinstance(v, list):
+            raw.extend([str(x) for x in v if x])
+        elif isinstance(v, str):
+            raw.append(v)
+    out, seen = [], set()
+    for p in raw:
+        fio = _clean_person(p)
+        k = fio.lower()
+        if fio and k not in seen:
+            seen.add(k); out.append(fio)
+    return out
+
+def _domain_from_site(site_hint: str | None) -> str:
+    if not site_hint:
+        return ""
+    m = re.search(r"^(?:https?://)?([^/]+)", site_hint.strip(), re.I)
+    return (m.group(1) if m else "").lower()
+
+def _extract_urls(text: str) -> list[str]:
+    return list(dict.fromkeys(re.findall(r'https?://[^\s<>)"\'\]]+', text or "")))
+
+def _build_people_discovery_prompt(company: str,
+                                   site_hint: str | None,
+                                   market: str | None) -> str:
+    dom = _domain_from_site(site_hint)
+    mkt = f"(рынок: {market}). " if market else ""
+    site_line = f"Официальный сайт (если верно): {site_hint}. " if site_hint else ""
+    return f"""
+Найди действующих руководителей и/или основателей компании «{company}». {mkt}{site_line}
+Охват 5 лет. Только подтверждённые факты с ПРЯМЫМИ URL.
+
+Формат вывода — только строки:
+PERSON: <ФИО> — <должность/роль> — <прямой URL на источник>
+
+Требования:
+— Не указывать ИНН/ОГРН, доли, структуру владения и финансовые показатели.
+— Предпочтительно источники: официальный сайт{(' ('+dom+')' if dom else '')}, СМИ, профильные медиа, видео/подкасты, соцсети компании.
+— Если данных нет — выведи «PERSON: нет данных».
+""".strip()
+
+def _parse_people_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    ppl = []
+    for ln in text.splitlines():
+        m = re.match(r"\s*PERSON:\s*(.+?)\s+—\s+.+?\s+—\s+https?://", ln.strip(), re.I)
+        if m:
+            fio = _clean_person(m.group(1))
+            if fio:
+                ppl.append(fio)
+    return list(dict.fromkeys(ppl))
+
+def _build_interviews_prompt(company: str,
+                             names: list[str],
+                             site_hint: str | None,
+                             market: str | None) -> str:
+    names_block = "; ".join(names[:10]) or "—"
+    site_line = f"Официальный сайт: {site_hint}. " if site_hint else ""
+    mkt = f"(рынок: {market})" if market else ""
+    return f"""
+Ты — медиа-аналитик. Найди интервью/публичные разговоры по людям [{names_block}] из компании «{company}» {mkt}.
+{site_line}Охват 5 лет. Только подтверждаемые факты и ПРЯМЫЕ URL. Никаких ИНН/ОГРН/финансов.
+
+Формат вывода — ОДИН абзац (без списков):
+«ФИО — площадка/издание — краткая суть (1 фраза) — URL (YYYY-MM-DD)»;
+записи разделяй точкой с запятой «;», не повторяй ссылки. Всего 3–8 записей.
+В конце абзаца через пробел добавь: «Источники: <URL1>, <URL2>, ...» (уникальные).
+""".strip()
+
+_SEC_INTERV_RE = re.compile(r"(^|\n)###\s*Интервью[^\n]*\n.*?(?=\n###\s|\Z)",
+                            flags=re.S | re.I)
+
+def _replace_interviews_section(md: str, new_paragraph: str) -> str:
+    block = f"\n### Интервью (владельцы/руководство)\n{new_paragraph.strip()}\n"
+    if _SEC_INTERV_RE.search(md or ""):
+        return _SEC_INTERV_RE.sub(block, md, count=1)
+    # если раздела нет — вставим перед «Цифровые каналы» или в конец
+    m = re.search(r"(^|\n)###\s*Цифровые\s+каналы[^\n]*", md or "", flags=re.I)
+    if m:
+        return md[:m.start()] + block + md[m.start():]
+    return (md or "").rstrip() + block
+
+def interviews_from_checko_sonar(company: str,
+                                 company_info: dict | None = None,
+                                 site_hint: str | None = None,
+                                 market: str | None = None,
+                                 max_people_discovery: int = 6) -> tuple[list[str], str]:
+    """
+    Возвращает (names, paragraph_markdown).
+    names — финальный список ФИО, paragraph_markdown — один абзац с интервью.
+    """
+    # 1) имена из Checko
+    names = _names_from_checko(company_info)
+
+    # 2) если имён нет/мало — discovery через Sonar
+    if len(names) < 2:
+        try:
+            p_disc = _build_people_discovery_prompt(company, site_hint, market)
+            raw = _pplx_call_invest(p_disc, model="sonar", recency=None, max_tokens=900)
+            discovered = _parse_people_lines(raw)
+        except Exception:
+            discovered = []
+        for fio in discovered:
+            if fio.lower() not in {n.lower() for n in names}:
+                names.append(fio)
+        names = names[:max_people_discovery] or ["нет данных"]
+
+    # 3) интервью по итоговому списку
+    try:
+        p_int = _build_interviews_prompt(company, names, site_hint, market)
+        digest = _pplx_call_invest(p_int, model="sonar", recency=None, max_tokens=1400)
+    except Exception as e:
+        digest = f"нет данных (ошибка поиска интервью: {e})"
+
+    # дедуп URL внутри абзаца
+    def _urls_in(t: str) -> list[str]: return _extract_urls(t)
+    seen = set(); parts = []
+    for part in re.split(r"\s*;\s*", (digest or "").strip()):
+        u = next(iter(_urls_in(part)), None)
+        if not u or u not in seen:
+            parts.append(part.strip())
+            if u: seen.add(u)
+    paragraph = "; ".join(parts)
+    paragraph = sanitize_invest(paragraph)   # фильтр финансов/ИНН/ОГРН
+
+    return names, paragraph
+
+def invest_snapshot_enriched(company: str,
+                             site_hint: Optional[str] = None,
+                             company_info: dict | None = None,
+                             market: str | None = None,
+                             model: str = "sonar",
+                             recency: Optional[str] = None,
+                             max_tokens: int = 1500) -> str:
+    """
+    Строит обычный INVEST SNAPSHOT, потом заменяет/вставляет секцию «Интервью»
+    материалом, собранным на базе Checko (+ Sonar discovery при необходимости).
+    """
+    base_md = invest_snapshot(company, site_hint=site_hint, model=model,
+                              recency=recency, max_tokens=max_tokens)
+    _, paragraph = interviews_from_checko_sonar(company,
+                                                company_info=company_info,
+                                                site_hint=site_hint,
+                                                market=market)
+    return _replace_interviews_section(base_md, paragraph)
+
+@st.cache_data(ttl=86_400, show_spinner="📝 Собираем описание (enriched)…")
+def get_invest_snapshot_enriched(company: str,
+                                 site_hint: Optional[str] = None,
+                                 company_info: dict | None = None,
+                                 market: str | None = None,
+                                 model: str = "sonar",
+                                 recency: Optional[str] = None,
+                                 max_tokens: int = 1500) -> dict:
+    try:
+        md = invest_snapshot_enriched(company, site_hint=site_hint,
+                                      company_info=company_info, market=market,
+                                      model=model, recency=recency, max_tokens=max_tokens)
+        return {"md": md, "raw": md}
+    except PPLXError as e:
+        return {"md": f"_Не удалось получить INVEST SNAPSHOT (enriched): {e}_", "raw": ""}
+
+
+
+
+
+
+
 class RAG:
     """
     summary    – финальный отчёт (Google-сниппеты + паспорт сайта)
@@ -1731,7 +1923,20 @@ def run_ai_insight_tab() -> None:
                     
                     else:
                         with st.spinner("Генерируем INVEST SNAPSHOT…"):
-                            inv = get_invest_snapshot(first_name, site_hint=first_site, model="sonar", recency=None, max_tokens=1500)
+                            company_info_first = {
+                                "leaders_raw":  (df_companies.loc[0, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                                "founders_raw": (df_companies.loc[0, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                            }
+                            
+                            inv = get_invest_snapshot_enriched(
+                                first_name,
+                                site_hint=first_site,
+                                company_info=company_info_first,
+                                market=first_mkt,
+                                model="sonar",
+                                recency=None,
+                                max_tokens=1500
+                            )
                     
                         # inv['md'] уже Markdown → без _linkify
                         st.markdown(
@@ -1783,41 +1988,63 @@ def run_ai_insight_tab() -> None:
                             # (опционально) отладка сырого ответа
                             with st.expander("🔧 Отладка (сырой ответ)"):
                                 st.text(ev["raw_text"] or "—")
+
+                        if "mkt_res" not in locals():
+                            mkt_res = {}
                     
                     # ----------- Руководители и интервью -----------------------------------
+                    # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
-                    with st.spinner("Собираем руководителей и интервью…"):
-                        # берём Checko-карточку первой компании из готового DataFrame
-                        company_info = df_companies.iloc[0].to_dict()
                     
-                        lead_res = get_leaders_rag(
-                            first_name,
-                            website=first_site,
-                            market=first_mkt,
-                            company_info=company_info,      # ← передаём dict с leaders_raw / founders_raw
-                        )
-                    
-                    st.markdown(
-                        f"<div style='background:#F9FAFB;border:1px solid #ddd;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>"
-                        f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
-                        unsafe_allow_html=True,
+                    use_legacy_leaders_first = st.toggle(
+                        "Показать расширенный поиск интервью (legacy)",
+                        value=False,
+                        key="leaders_first"  # уникальный ключ
                     )
                     
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(lead_res["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
+                    if use_legacy_leaders_first:
+                        with st.spinner("Собираем руководителей и интервью (legacy)…"):
+                            # берём ТОЛЬКО нужные ключи из df_companies (а не всю карточку)
+                            company_info = {
+                                "leaders_raw":  (df_companies.loc[0, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                                "founders_raw": (df_companies.loc[0, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                            }
                     
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        if lead_res["snippets"]:
-                            df = (
-                                pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
-                                .drop_duplicates(subset="URL")
-                                .head(15)
+                            lead_res = get_leaders_rag(
+                                first_name,
+                                website=first_site,
+                                market=first_mkt,
+                                company_info=company_info,  # ← имена из Checko → дальше поиск интервью в интернете
                             )
-                            st.dataframe(df, use_container_width=True)
-                        else:
-                            st.info("Сниппеты не найдены.")
+                    
+                        st.markdown(
+                            f"<div style='background:#F9FAFB;border:1px solid #ddd;"
+                            f"border-radius:8px;padding:18px;line-height:1.55'>"
+                            f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(lead_res["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+                    
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            if lead_res["snippets"]:
+                                df = (
+                                    pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
+                                    .drop_duplicates(subset="URL")
+                                    .head(15)
+                                )
+                                st.dataframe(df, use_container_width=True)
+                            else:
+                                st.info("Сниппеты не найдены.")
+                    else:
+                        st.info("Базовые интервью уже есть в блоке «Интервью (владельцы/руководство)» внутри INVEST SNAPSHOT выше. "
+                                "Включите переключатель, чтобы выполнить расширенный поиск по именам из Checko и в интернете.")
+
+                    # --- страховки, если тумблер был выключен (переменные не создались) ---
+                    if "lead_res" not in locals():
+                        lead_res = {"summary": "", "queries": [], "snippets": []}
                     
                     # ─────── конец блока, дальше ваш код (если был) ───────────────────────
             
@@ -2027,44 +2254,37 @@ def run_ai_insight_tab() -> None:
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
-                    with st.spinner("Собираем руководителей и интервью…"):
+                    use_legacy_leaders = st.toggle("Показать расширенный поиск интервью (legacy)", value=False, key="leaders_first")
                     
-                        # ① берём сырые списки руководителей / учредителей из готового df_companies
-                        company_info = {
-                            "leaders_raw":  df_companies.loc[idx, "leaders_raw"]  or [],
-                            "founders_raw": df_companies.loc[idx, "founders_raw"] or [],
-                        }
-                    
-                        # ② запускаем пайплайн
-                        lead_res = get_leaders_rag(
-                            name,
-                            website=site,
-                            market=mkt,
-                            company_info=company_info,   # ← только нужные ключи
-                        )
-                    
-                    # вывод
-                    st.markdown(
-                        f"<div style='background:#F9FAFB;border:1px solid #ddd;"
-                        f"border-radius:8px;padding:18px;line-height:1.55'>"
-                        f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    
-                    with st.expander("⚙️ Запросы к Google"):
-                        for i, q in enumerate(lead_res["queries"], 1):
-                            st.markdown(f"**{i}.** {q}")
-                    
-                    with st.expander("🔍 Сниппеты (top-15)"):
-                        if lead_res["snippets"]:
-                            df = (
-                                pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
-                                .drop_duplicates(subset="URL")
-                                .head(15)
+                    if use_legacy_leaders:
+                        with st.spinner("Собираем руководителей и интервью (legacy)…"):
+                            company_info = df_companies.iloc[0].to_dict()
+                            lead_res = get_leaders_rag(
+                                first_name,
+                                website=first_site,
+                                market=first_mkt,
+                                company_info=company_info,
                             )
-                            st.dataframe(df, use_container_width=True)
-                        else:
-                            st.info("Сниппеты не найдены.")
+                        st.markdown(
+                            f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.55'>"
+                            f"{lead_res['summary'].replace(chr(10), '<br>')}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        with st.expander("⚙️ Запросы к Google"):
+                            for i, q in enumerate(lead_res["queries"], 1):
+                                st.markdown(f"**{i}.** {q}")
+                        with st.expander("🔍 Сниппеты (top-15)"):
+                            if lead_res["snippets"]:
+                                df = (
+                                    pd.DataFrame(lead_res["snippets"], columns=["URL", "Snippet"])
+                                    .drop_duplicates(subset="URL")
+                                    .head(15)
+                                )
+                                st.dataframe(df, use_container_width=True)
+                            else:
+                                st.info("Сниппеты не найдены.")
+                    else:
+                        st.info("Интервью смотрите в разделе «Интервью (владельцы/руководство)» внутри INVEST SNAPSHOT выше.")
 
         st.session_state["ai_report"] = {
             "doc":          doc,          # описание компании
@@ -2120,22 +2340,4 @@ with tab_eye:
     run_advance_eye_tab()      # поиск Dyxless
 
 
-# In[6]:
 
-
-
-
-
-# In[14]:
-
-
-
-
-
-# In[13]:
-
-
-
-
-
-# In[ ]:
