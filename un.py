@@ -1999,7 +1999,7 @@ def run_ai_insight_tab() -> None:
                     use_legacy_leaders_first = st.toggle(
                         "Показать расширенный поиск интервью (legacy)",
                         value=False,
-                        key="leaders_first"  # уникальный ключ
+                        key="leaders_global"  # <- было "leaders_first"
                     )
                     
                     if use_legacy_leaders_first:
@@ -2254,15 +2254,24 @@ def run_ai_insight_tab() -> None:
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
-                    use_legacy_leaders = st.toggle("Показать расширенный поиск интервью (legacy)", value=False, key="leaders_first")
+                    use_legacy_leaders = st.toggle(
+                        "Показать расширенный поиск интервью (legacy)",
+                        value=False,
+                        key=f"leaders_{idx}"  # <- вместо "leaders_first"
+                    )
                     
                     if use_legacy_leaders:
                         with st.spinner("Собираем руководителей и интервью (legacy)…"):
-                            company_info = df_companies.iloc[0].to_dict()
+                            row_idx = inns.index(inn)  # индекс текущего ИНН в изначальном списке
+                            company_info = {
+                                "leaders_raw":  (df_companies.loc[row_idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                                "founders_raw": (df_companies.loc[row_idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                            }
+                        
                             lead_res = get_leaders_rag(
-                                first_name,
-                                website=first_site,
-                                market=first_mkt,
+                                name,                # <- было first_name
+                                website=site,        # <- было first_site
+                                market=mkt,          # <- было first_mkt
                                 company_info=company_info,
                             )
                         st.markdown(
