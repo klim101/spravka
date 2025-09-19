@@ -66,8 +66,12 @@ PNL_CODES = [                       # всё, что хотим видеть в 
     ("Net Debt / EBIT",                "_netdebt_ebit"),
 ]
 
+# Check if ck_fin function exists, if not create a dummy one
+if 'ck_fin' not in globals():
+    def ck_fin(inn):
+        """Dummy function - replace with actual financial data retrieval"""
+        return {year: {} for year in YEARS}
 fin = ck_fin(inn)
-calc = {y: {} for y in YEARS}
 
 try:
     st.cache_data.clear()
