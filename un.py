@@ -42,41 +42,6 @@ KEYS = {
 }
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
-# ---------- Финансовый профиль ----------
-
-# ---------- 2. Тонкие обёртки (по желанию) ----------
-ck_company = functools.partial(ck_call, "company")
-ck_fin     = functools.partial(ck_call, "finances")
-# при желании можно добавить ck_analytics = functools.partial(ck_call, "analytics")
-
-
-PNL_CODES = [                       # всё, что хотим видеть в длинной таблице
-    ("Выручка (₽ млн)",                "2110"),
-    ("Себестоимость продаж (₽ млн)",   "2120"),
-    ("Валовая прибыль (₽ млн)",        "2200"),
-    ("Коммерческие расходы (₽ млн)",   "2210"),
-    ("Управленческие расходы (₽ млн)", "2220"),
-    ("Прибыль от продаж (₽ млн)",      "2300"),
-    ("Доходы от участия (₽ млн)",      "2310"),
-    ("Проценты к получению (₽ млн)",   "2320"),
-    ("Проценты к уплате (₽ млн)",      "2330"),
-    ("Прочие доходы (₽ млн)",          "2340"),
-    ("Прочие расходы (₽ млн)",         "2350"),
-    ("Чистая прибыль (₽ млн)",         "2400"),
-    ("Совокупный долг (₽ млн)",        "_total_debt"),
-    ("Денежные средства (₽ млн)",      "_cash"),
-    ("Кредиторская задолженность (₽ млн)", "1520"),
-    ("Чистый долг (₽ млн)",            "_net_debt"),
-    ("EBIT margin (%)",                "_ebit_margin"),
-    ("Net Debt / EBIT",                "_netdebt_ebit"),
-]
-
-# Check if ck_fin function exists, if not create a dummy one
-if 'ck_fin' not in globals():
-    def ck_fin(inn):
-        """Dummy function - replace with actual financial data retrieval"""
-        return {year: {} for year in YEARS}
-fin = ck_fin(inn)
 
 try:
     st.cache_data.clear()
@@ -1307,31 +1272,48 @@ def get_market_evidence(
 
 
 # === Leaders & Interviews (2-pass, Sonar-only, no cache) ======================
+# === Leaders & Interviews (2-pass, Sonar-only, no cache) ======================
+# Использует только: re, html, typing, _pplx_call_invest, sanitize_invest
 import re, html
-from typing import Optional, List
+from typing import Optional, List, Dict
+
+_URL_RE = re.compile(r'https?://[^\s<>)"\'\]]+')
 
 def _clean_person(s: str) -> str:
+    """Убирает хвосты в скобках и лишние пробелы: 'Иванов (ИНН..., доля...)' → 'Иванов'."""
     s = (s or "").strip()
     s = re.sub(r"\s*\(.*?\)\s*$", "", s)
     s = re.sub(r"\s{2,}", " ", s)
     return s
 
 def _extract_urls(text: str) -> List[str]:
-    return list(dict.fromkeys(re.findall(r'https?://[^\s<>)"\'\]]+', text or "")))
+    """Извлекает уникальные URL в порядке появления."""
+    return list(dict.fromkeys(_URL_RE.findall(text or "")))
 
 def _dedup_urls_in_paragraph(paragraph: str) -> str:
-    seen = set(); out = []
+    """
+    Режем по «;», оставляем первую запись с каждым уникальным URL.
+    Возвращаем склеенный абзац тем же разделителем.
+    """
+    seen, out = set(), []
     for part in re.split(r"\s*;\s*", (paragraph or "").strip()):
-        if not part: continue
+        if not part:
+            continue
         u = next(iter(_extract_urls(part)), None)
         if (not u) or (u not in seen):
             out.append(part.strip())
-            if u: seen.add(u)
+            if u:
+                seen.add(u)
     return "; ".join(out)
 
-def _names_from_checko_min(company_info: dict | None) -> List[str]:
-    if not isinstance(company_info, dict): return []
-    raw = []
+def _names_from_checko(company_info: Optional[Dict]) -> List[str]:
+    """
+    Достаёт ФИО из dict {'leaders_raw': [...], 'founders_raw': [...]},
+    чистит хвосты '(ИНН..., доля ...)', делает дедуп по нижнему регистру.
+    """
+    if not isinstance(company_info, dict):
+        return []
+    raw: List[str] = []
     for k in ("leaders_raw", "founders_raw"):
         v = company_info.get(k) or []
         if isinstance(v, list):
@@ -1340,49 +1322,64 @@ def _names_from_checko_min(company_info: dict | None) -> List[str]:
             raw.append(_clean_person(v))
     out, seen = [], set()
     for fio in raw:
-        k = fio.lower()
-        if fio and k not in seen:
-            seen.add(k); out.append(fio)
+        key = fio.lower()
+        if fio and key not in seen:
+            seen.add(key)
+            out.append(fio)
     return out
 
-def _build_people_discovery_prompt(company: str, site_hint: Optional[str], market: Optional[str]) -> str:
+def _build_people_discovery_prompt(company: str,
+                                   site_hint: Optional[str],
+                                   market: Optional[str]) -> str:
     site_line = f"Официальный сайт (если верно): {site_hint}. " if site_hint else ""
-    mkt = f"(рынок: {market})" if market else ""
+    mkt = f"(рынок: {market}). " if market else ""
     return f"""
-Найди действующих руководителей и/или основателей компании «{company}» {mkt}.
-{site_line}Охват 5 лет. Только подтверждённые факты с ПРЯМЫМИ URL.
+Найди действующих руководителей и/или основателей компании «{company}». {mkt}{site_line}
+Охват 5 лет. Только подтверждённые факты с ПРЯМЫМИ URL.
+
 Формат вывода — только строки:
 PERSON: <ФИО> — <должность/роль> — <прямой URL>
 """.strip()
 
 def _parse_people_lines(text: str) -> List[str]:
-    if not text: return []
-    ppl = []
+    """Парсит строки вида 'PERSON: Иван Иванов — гендиректор — https://...'; возвращает список ФИО."""
+    if not text:
+        return []
+    ppl: List[str] = []
     for ln in text.splitlines():
         m = re.match(r"\s*PERSON:\s*(.+?)\s+—\s+.+?\s+—\s+https?://", ln.strip(), re.I)
         if m:
             fio = _clean_person(m.group(1))
-            if fio: ppl.append(fio)
+            if fio:
+                ppl.append(fio)
+    # дедуп с сохранением порядка
     return list(dict.fromkeys(ppl))
 
-def _build_interviews_by_names_prompt(company: str, names: List[str], site_hint: Optional[str], market: Optional[str]) -> str:
+def _build_interviews_prompt(company: str,
+                             names: List[str],
+                             site_hint: Optional[str],
+                             market: Optional[str]) -> str:
     names_block = "; ".join(names[:10]) or "—"
     site_line = f"Официальный сайт: {site_hint}. " if site_hint else ""
     mkt = f"(рынок: {market})" if market else ""
     return f"""
-Ты — медиа-аналитик. Найди интервью/публичные разговоры по людям [{names_block}]
-из компании «{company}» {mkt}.
+Ты — медиа-аналитик. Найди интервью/публичные разговоры по людям [{names_block}] из компании «{company}» {mkt}.
 {site_line}Охват 5 лет. Только подтверждаемые факты и ПРЯМЫЕ URL. Никаких ИНН/ОГРН/финансов.
+
 Формат вывода — ОДИН абзац (без списков):
 «ФИО — площадка/издание — краткая суть (1 фраза) — URL (YYYY-MM-DD)»;
-записи разделяй точкой с запятой «;», не повторяй ссылки.
-В конце абзаца добавь: « Источники: <URL1>, <URL2>, ...» (уникальные).
+записи разделяй точкой с запятой «;», не повторяй ссылки. Всего 3–8 записей.
+В конце абзаца через пробел добавь: «Источники: <URL1>, <URL2>, ...» (уникальные).
 """.strip()
 
-def _interviews_by_names(company: str, names: List[str], site_hint: Optional[str], market: Optional[str]) -> str:
+def _interviews_by_names(company: str,
+                         names: List[str],
+                         site_hint: Optional[str],
+                         market: Optional[str]) -> str:
+    """Ищет интервью по заданным ФИО и возвращает один очищенный абзац или 'нет данных'."""
     if not names:
         return "нет данных"
-    prompt = _build_interviews_by_names_prompt(company, names, site_hint, market)
+    prompt = _build_interviews_prompt(company, names, site_hint, market)
     try:
         raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=1400)
     except Exception as e:
@@ -1391,102 +1388,41 @@ def _interviews_by_names(company: str, names: List[str], site_hint: Optional[str
     para = _dedup_urls_in_paragraph(para)
     return para or "нет данных"
 
-def _discover_people(company: str, site_hint: Optional[str], market: Optional[str], top_n: int = 6) -> List[str]:
+def _discover_people(company: str,
+                     site_hint: Optional[str],
+                     market: Optional[str],
+                     top_n: int = 6) -> List[str]:
+    """Дискавери ФИО через Sonar (без Checko)."""
     prompt = _build_people_discovery_prompt(company, site_hint, market)
     try:
-        raw = call_pplx(prompt, model="sonar", recency=None, max_tokens=900)
+        raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=900)
     except Exception:
         return []
     names = _parse_people_lines(raw)
     return names[:top_n]
 
-def build_dual_interviews(company: str, company_info: dict | None = None,
-                          site_hint: Optional[str] = None, market: Optional[str] = None) -> dict:
-    names_checko = _names_from_checko_min(company_info)
+def build_dual_interviews(company: str,
+                          company_info: Optional[Dict] = None,
+                          site_hint: Optional[str] = None,
+                          market: Optional[str] = None,
+                          max_people_inet: int = 8) -> Dict[str, object]:
+    """
+    Двухпроходный поиск интервью:
+      1) ФИО из Checko → один абзац интервью.
+      2) Дискавери ФИО в интернете → один абзац интервью.
+    Возвращает dict с:
+      - names_checko: List[str]
+      - digest_checko: str (абзац или 'нет данных')
+      - names_inet: List[str] (до max_people_inet)
+      - digest_inet: str (абзац или 'нет данных')
+    """
+    # 1) Имена по Checko
+    names_checko = _names_from_checko(company_info)
     digest_checko = _interviews_by_names(company, names_checko, site_hint, market) if names_checko else "нет данных"
-    names_inet = _discover_people(company, site_hint, market)
+
+    # 2) Интернет-дискавери → имена → интервью
+    names_inet = _discover_people(company, site_hint, market, top_n=max_people_inet)
     digest_inet = _interviews_by_names(company, names_inet, site_hint, market) if names_inet else "нет данных"
-    return {
-        "names_checko": names_checko, "digest_checko": digest_checko,
-        "names_inet": names_inet,     "digest_inet": digest_inet,
-    }
-
-# --- dual interviews wrapper (keeps v2 intact) ---------------------------------
-import re, html
-
-def _norm_names_from_checko(company_info: dict | None) -> list[str]:
-    if not isinstance(company_info, dict): return []
-    raw = []
-    for k in ("leaders_raw", "founders_raw"):
-        v = company_info.get(k) or []
-        if isinstance(v, list):
-            raw.extend([str(x) for x in v if x])
-        elif isinstance(v, str):
-            raw.append(v)
-    # срезаем хвосты " (ИНН..., доля ...)"
-    clean = [re.sub(r"\s*\(.*?\)\s*$", "", s).strip() for s in raw]
-    out, seen = [], set()
-    for fio in clean:
-        k = fio.lower()
-        if fio and k not in seen:
-            seen.add(k); out.append(fio)
-    return out
-
-def build_dual_interviews_from_v2(company: str,
-                                  company_info: dict | None = None,
-                                  site_hint: str | None = None,
-                                  market: str | None = None,
-                                  max_people_inet: int = 8) -> dict:
-    # 1) ФИО из Checko → интервью
-    names_checko = _norm_names_from_checko(company_info)
-    dig_checko_parts = []
-    for nm in names_checko:
-        try:
-            blk = person_interviews_only(nm, company=company, model="sonar", recency=None, max_tokens=600)
-        except Exception as e:
-            blk = f"нет данных (ошибка: {e})"
-        if blk and blk.strip().lower() != "нет данных":
-            dig_checko_parts.append(blk.strip())
-    digest_checko = "\n".join(dig_checko_parts) if dig_checko_parts else "нет данных"
-
-    # 2) Интернет-дискавери → кандидаты → люди → интервью
-    people = []
-    try:
-        cands = find_candidates(company, site_hint=site_hint, market=market, model="sonar", recency=None, max_candidates=12)
-    except Exception:
-        cands = []
-
-    for c in cands:
-        nm = (c.get("name") or "").strip()
-        kd = (c.get("kind") or "").lower()
-        if kd == "org" or looks_like_org(nm):
-            try:
-                exp = expand_org_to_people(nm, company, site_hint=site_hint, market=market,
-                                           model="sonar", recency=None, max_people=8)
-                people.extend([(p["name"], p.get("role") or f"бенефициар {nm}") for p in exp])
-            except Exception:
-                pass
-        elif nm:
-            people.append((nm, c.get("role") or "владелец/бенефициар"))
-
-    # дедуп по имени
-    names_inet = []
-    seen = set()
-    for nm, _role in people:
-        k = nm.lower()
-        if nm and k not in seen:
-            seen.add(k); names_inet.append(nm)
-    names_inet = names_inet[:max_people_inet]
-
-    dig_inet_parts = []
-    for nm in names_inet:
-        try:
-            blk = person_interviews_only(nm, company=company, model="sonar", recency=None, max_tokens=600)
-        except Exception as e:
-            blk = f"нет данных (ошибка: {e})"
-        if blk and blk.strip().lower() != "нет данных":
-            dig_inet_parts.append(blk.strip())
-    digest_inet = "\n".join(dig_inet_parts) if dig_inet_parts else "нет данных"
 
     return {
         "names_checko": names_checko,
@@ -1495,89 +1431,8 @@ def build_dual_interviews_from_v2(company: str,
         "digest_inet": digest_inet,
     }
 
-
-# --- dual interviews wrapper (v2 unchanged) ---------------------------------
-import re, html
-
-def _norm_names_from_checko(company_info: dict | None) -> list[str]:
-    if not isinstance(company_info, dict): return []
-    raw = []
-    for k in ("leaders_raw", "founders_raw"):
-        v = company_info.get(k) or []
-        if isinstance(v, list):
-            raw.extend([str(x) for x in v if x])
-        elif isinstance(v, str):
-            raw.append(v)
-    clean = [re.sub(r"\s*\(.*?\)\s*$", "", s).strip() for s in raw]
-    out, seen = [], set()
-    for fio in clean:
-        k = fio.lower()
-        if fio and k not in seen:
-            seen.add(k); out.append(fio)
-    return out
-
-def build_dual_interviews_from_v2(company: str,
-                                  company_info: dict | None = None,
-                                  site_hint: str | None = None,
-                                  market: str | None = None,
-                                  max_people_inet: int = 8) -> dict:
-    # 1) ФИО из Checko → интервью
-    names_checko = _norm_names_from_checko(company_info)
-    dig_checko_parts = []
-    for nm in names_checko:
-        try:
-            blk = person_interviews_only(nm, company=company, model="sonar", recency=None, max_tokens=600)
-        except Exception as e:
-            blk = f"нет данных (ошибка: {e})"
-        if blk and blk.strip().lower() != "нет данных":
-            dig_checko_parts.append(blk.strip())
-    digest_checko = "\n".join(dig_checko_parts) if dig_checko_parts else "нет данных"
-
-    # 2) Интернет-дискавери → кандидаты → люди → интервью
-    people = []
-    try:
-        cands = find_candidates(company, site_hint=site_hint, market=market,
-                                model="sonar", recency=None, max_candidates=12)
-    except Exception:
-        cands = []
-
-    for c in cands:
-        nm = (c.get("name") or "").strip()
-        kd = (c.get("kind") or "").lower()
-        if kd == "org" or looks_like_org(nm):
-            try:
-                exp = expand_org_to_people(nm, company, site_hint=site_hint, market=market,
-                                           model="sonar", recency=None, max_people=8)
-                people.extend([(p["name"], p.get("role") or f"бенефициар {nm}") for p in exp])
-            except Exception:
-                pass
-        elif nm:
-            people.append((nm, c.get("role") or "владелец/бенефициар"))
-
-    # дедуп по имени
-    names_inet, seen = [], set()
-    for nm, _role in people:
-        k = nm.lower()
-        if nm and k not in seen:
-            seen.add(k); names_inet.append(nm)
-    names_inet = names_inet[:max_people_inet]
-
-    dig_inet_parts = []
-    for nm in names_inet:
-        try:
-            blk = person_interviews_only(nm, company=company, model="sonar", recency=None, max_tokens=600)
-        except Exception as e:
-            blk = f"нет данных (ошибка: {e})"
-        if blk and blk.strip().lower() != "нет данных":
-            dig_inet_parts.append(blk.strip())
-    digest_inet = "\n".join(dig_inet_parts) if dig_inet_parts else "нет данных"
-
-    return {
-        "names_checko": names_checko,
-        "digest_checko": digest_checko,
-        "names_inet": names_inet,
-        "digest_inet": digest_inet,
-    }
+# --- Backward-compat: оставляем старое имя, чтобы существующие вызовы не падали
+build_dual_interviews_from_v2 = build_dual_interviews
 
 
 
@@ -1601,7 +1456,10 @@ def ck_call(endpoint: str, inn: str):
     r.raise_for_status()
     return r.json()["data"]
 
-
+# ---------- 2. Тонкие обёртки (по желанию) ----------
+ck_company = functools.partial(ck_call, "company")
+ck_fin     = functools.partial(ck_call, "finances")
+# при желании можно добавить ck_analytics = functools.partial(ck_call, "analytics")
 
 
 
@@ -1667,21 +1525,11 @@ def _safe_div(a: float | None, b: float | None) -> float | None:
 
 
 
-import openai, asyncio, nest_asyncio, logging
-nest_asyncio.apply()
+
 
 # кешируем, чтобы при повторных кликах не дергать LLM и сайт заново
 @st.cache_data(ttl=86_400, show_spinner=False)
-def get_site_passport(url: str) -> dict:
-    """Синхронный обёртка SiteRAG.run() с кешированием."""
-    if not url:
-        return {"summary": "", "chunks_out": [], "html_size": "0", "url": url}
-    try:
-        return SiteRAG(url).run()
-    except Exception as e:
-        logging.warning(f"[SiteRAG] {url} → {e}")
-        return {"summary": f"(не удалось распарсить сайт: {e})",
-                "chunks_out": [], "html_size": "0", "url": url}
+
 
 
 
@@ -1817,7 +1665,26 @@ def run_ai_insight_tab() -> None:
             
 
             
-
+            PNL_CODES = [                       # всё, что хотим видеть в длинной таблице
+                ("Выручка (₽ млн)",                "2110"),
+                ("Себестоимость продаж (₽ млн)",   "2120"),
+                ("Валовая прибыль (₽ млн)",        "2200"),
+                ("Коммерческие расходы (₽ млн)",   "2210"),
+                ("Управленческие расходы (₽ млн)", "2220"),
+                ("Прибыль от продаж (₽ млн)",      "2300"),
+                ("Доходы от участия (₽ млн)",      "2310"),
+                ("Проценты к получению (₽ млн)",   "2320"),
+                ("Проценты к уплате (₽ млн)",      "2330"),
+                ("Прочие доходы (₽ млн)",          "2340"),
+                ("Прочие расходы (₽ млн)",         "2350"),
+                ("Чистая прибыль (₽ млн)",         "2400"),
+                ("Совокупный долг (₽ млн)",        "_total_debt"),
+                ("Денежные средства (₽ млн)",      "_cash"),
+                ("Кредиторская задолженность (₽ млн)", "1520"),
+                ("Чистый долг (₽ млн)",            "_net_debt"),
+                ("EBIT margin (%)",                "_ebit_margin"),
+                ("Net Debt / EBIT",                "_netdebt_ebit"),
+            ]
             
             # ---------- ① сводная вкладка, если нужна ----------
             def build_agg_finances() -> dict[str, dict[str, float | None]]:
@@ -1977,31 +1844,21 @@ def run_ai_insight_tab() -> None:
                     
                     else:
                         with st.spinner("Генерируем INVEST SNAPSHOT…"):
-                            company_info_first = {
-                                "leaders_raw":  (df_companies.loc[0, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
-                                "founders_raw": (df_companies.loc[0, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
-                            }
-                            
-                            # стало (без кэша)
-                            inv_md = invest_snapshot_enriched(
-                                first_name,
-                                site_hint=first_site,
-                                company_info=company_info_first,   # dict с leaders_raw / founders_raw
-                                market=first_mkt,
-                                model="sonar",
-                                recency=None,
-                                max_tokens=1500
+                            company_info_first = {...}
+                            inv = get_invest_snapshot_enriched(
+                                first_name, site_hint=first_site,
+                                company_info=company_info_first, market=first_mkt,
+                                model="sonar", recency=None, max_tokens=1500
                             )
-                            st.markdown(
-                                f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv_md}</div>",
-                                unsafe_allow_html=True,
-                            )
-                            doc = {"summary": inv_md, "mode": "invest_snapshot"}
+                        
+                        st.markdown(
+                            f"<div ...>{inv['md']}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        doc = {"summary": inv["md"], "mode": "invest_snapshot"}
+                        
                         with st.expander("🔧 Отладка (сырой ответ)"):
-                            st.text(inv["raw"] or "—")
-                    
-                    # (опционально) запоминаем «doc» для session_state
-                    doc = doc if desc_legacy else {"summary": inv["md"], "mode": "invest_snapshot"}
+                            st.text(inv.get("raw") or "—")
                     
                     # ----------- Рыночный отчёт (MARKET EVIDENCE) ------------------------
                     if first_mkt:
@@ -2189,30 +2046,32 @@ def run_ai_insight_tab() -> None:
             
                     
                     
-                    # ────── Описание компании (Google + сайт) ───────────────────────────
-                    inv = get_invest_snapshot_enriched(
-                        cmp_name,                     # было: name
-                        site_hint=site,
-                        company_info={
-                            "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
-                            "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
-                        } if "leaders_raw" in df_companies.columns else None,
-                        market=mkt,                   # было: market
-                        model="sonar", recency=None, max_tokens=1500
-                    )
+                    # ────── Описание компании (INVEST SNAPSHOT enriched) ───────────────────────────
                     
-                    # Интервью (вкладки)
-                    dual = build_dual_interviews_from_v2(
-                        cmp_name,                     # было: name
-                        company_info=company_info_row,
-                        site_hint=site,
-                        market=mkt                    # было: market
-                    )
+                    # 1) готoвим people из Checko для этой компании (используем дальше в двух местах)
+                    company_info_row = {
+                        "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                        "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                    }
+                    
+                    with st.spinner("Генерируем INVEST SNAPSHOT…"):
+                        inv = get_invest_snapshot_enriched(
+                            cmp_name,
+                            site_hint=site,
+                            company_info=company_info_row,
+                            market=mkt,
+                            model="sonar", recency=None, max_tokens=1500
+                        )
+                    
                     st.markdown(
                         f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv['md']}</div>",
                         unsafe_allow_html=True,
                     )
-                    doc = {"summary": inv["md"], "mode": "invest_snapshot"}  # чтобы дальше не было UnboundLocalError
+                    doc = {"summary": inv["md"], "mode": "invest_snapshot"}  # на случай, если где-то ниже нужен doc
+                    
+                    with st.expander("🔧 Отладка (сырой ответ)"):
+                        st.text(inv.get("raw") or "—")
+                    
                     
                     # ────── Рыночный отчёт (MARKET EVIDENCE) ─────────────────────────────
                     if mkt:
@@ -2224,8 +2083,7 @@ def run_ai_insight_tab() -> None:
                                 mkt_res = get_market_rag(mkt)
                             mkt_html = _linkify(mkt_res["summary"]).replace("\n", "<br>")
                             st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;border-radius:8px;padding:18px;line-height:1.55'>{mkt_html}</div>",
                                 unsafe_allow_html=True,
                             )
                             with st.expander("⚙️ Запросы к Google"):
@@ -2238,33 +2096,27 @@ def run_ai_insight_tab() -> None:
                             with st.spinner("Собираем MARKET EVIDENCE…"):
                                 ev = get_market_evidence(mkt, country="Россия", min_sources=8, recency=None)
                             st.markdown(
-                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;"
-                                f"border-radius:8px;padding:18px;line-height:1.55'>{ev['text_html']}</div>",
+                                f"<div style='background:#F1F5F8;border:1px solid #cfd9e2;border-radius:8px;padding:18px;line-height:1.55'>{ev['text_html']}</div>",
                                 unsafe_allow_html=True,
                             )
                             st.caption("СТРУКТУРА по источникам — деньги:")
                             st.code(ev["money_block"] or "—", language="text")
                             st.caption("СТРУКТУРА по источникам — натуральные объёмы:")
                             st.code(ev["natural_block"] or "—", language="text")
-                    
                             with st.expander("🔧 Отладка (сырой ответ)"):
                                 st.text(ev["raw_text"] or "—")
+                    
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
                     
-                    company_info_row = {
-                        "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
-                        "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
-                    }
-                    
                     with st.spinner("Ищем интервью (Checko → интернет)…"):
                         dual = build_dual_interviews_from_v2(
-                            name, company_info=company_info_row, site_hint=site, market=market
+                            cmp_name, company_info=company_info_row, site_hint=site, market=mkt
                         )
                     
-                    fio_checko = ", ".join(dual["names_checko"]) or "нет данных"
-                    fio_inet   = ", ".join(dual["names_inet"])   or "нет данных"
+                    fio_checko = ", ".join(dual.get("names_checko") or []) or "нет данных"
+                    fio_inet   = ", ".join(dual.get("names_inet") or [])   or "нет данных"
                     
                     st.markdown(
                         f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
@@ -2272,9 +2124,9 @@ def run_ai_insight_tab() -> None:
                         f"<p><b>ФИО (интернет):</b> {html.escape(fio_inet)}</p>"
                         f"<hr style='border:none;border-top:1px solid #eee;margin:10px 0'>"
                         f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4>"
-                        f"<div>{dual['digest_checko'].replace(chr(10), '<br>')}</div>"
+                        f"<div>{(dual.get('digest_checko') or 'нет данных').replace(chr(10), '<br>')}</div>"
                         f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
-                        f"<div>{dual['digest_inet'].replace(chr(10), '<br>')}</div>"
+                        f"<div>{(dual.get('digest_inet') or 'нет данных').replace(chr(10), '<br>')}</div>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -2324,6 +2176,3 @@ with tab_ai:
 
 with tab_eye:
     run_advance_eye_tab()      # поиск Dyxless
-
-
-
