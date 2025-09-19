@@ -44,6 +44,11 @@ KEYS = {
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 # ---------- Финансовый профиль ----------
 
+# ---------- 2. Тонкие обёртки (по желанию) ----------
+ck_company = functools.partial(ck_call, "company")
+ck_fin     = functools.partial(ck_call, "finances")
+# при желании можно добавить ck_analytics = functools.partial(ck_call, "analytics")
+
 
 PNL_CODES = [                       # всё, что хотим видеть в длинной таблице
     ("Выручка (₽ млн)",                "2110"),
@@ -1596,10 +1601,7 @@ def ck_call(endpoint: str, inn: str):
     r.raise_for_status()
     return r.json()["data"]
 
-# ---------- 2. Тонкие обёртки (по желанию) ----------
-ck_company = functools.partial(ck_call, "company")
-ck_fin     = functools.partial(ck_call, "finances")
-# при желании можно добавить ck_analytics = functools.partial(ck_call, "analytics")
+
 
 
 
