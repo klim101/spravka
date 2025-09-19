@@ -43,6 +43,17 @@ KEYS = {
 
 DYXLESS_TOKEN = KEYS["DYXLESS_TOKEN"]
 
+try:
+    st.cache_data.clear()   # на всякий случай подчистим старые слоты
+except Exception:
+    pass
+
+def _no_cache(*args, **kwargs):
+    def _decorator(func):
+        return func         # возвращаем функцию как есть (никакого кэширования)
+    return _decorator
+
+st.cache_data = _no_cache
 
 # ── Общие константы (единые для всего файла)
 HEADERS = {"User-Agent": "Mozilla/5.0 (Win64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
@@ -1999,7 +2010,7 @@ def run_ai_insight_tab() -> None:
                     use_legacy_leaders_first = st.toggle(
                         "Показать расширенный поиск интервью (legacy)",
                         value=False,
-                        key="leaders_global"  # <- было "leaders_first"
+                        key="leaders_first"  # <- было "leaders_first"
                     )
                     
                     if use_legacy_leaders_first:
@@ -2043,8 +2054,13 @@ def run_ai_insight_tab() -> None:
                                 "Включите переключатель, чтобы выполнить расширенный поиск по именам из Checko и в интернете.")
 
                     # --- страховки, если тумблер был выключен (переменные не создались) ---
-                    if "lead_res" not in locals():
-                        lead_res = {"summary": "", "queries": [], "snippets": []}
+                    if "lead_res" not in locals(): lead_res = {"summary": "", "queries": [], "snippets": []}
+                    if "mkt_res"  not in locals(): mkt_res  = {}
+                    if "tbl"      not in locals(): tbl      = pd.DataFrame()
+                    if "fig"      not in locals():
+                        import matplotlib.pyplot as plt
+                        fig = plt.figure()
+                    if "doc"      not in locals(): doc = {"summary": "", "mode": ""}
                     
                     # ─────── конец блока, дальше ваш код (если был) ───────────────────────
             
@@ -2058,18 +2074,12 @@ def run_ai_insight_tab() -> None:
             
             start_idx = 1 if (aggregate_mode and len(inns) > 1) else 0
             
-            for idx, (tab, inn, name, mkt, site) in enumerate(
-                    zip(
-                        tabs[start_idx:],   # пропускаем Σ-вкладку при необходимости
-                        inns,
-                        names_full,
-                        mkts_full,
-                        sites_full,
-                    )
+            for idx, (tab, inn, cmp_name, mkt, site) in enumerate(
+                zip(tabs[start_idx:], inns, names_full, mkts_full, sites_full)
             ):
                 with tab:
-                    st.header(f"{name} — {inn}")
-                    st.caption(f"Рынок: **{mkt or '—'}**")
+                    st.header(f"{cmp_name} — {inn}")
+                    # дальше везде используй cmp_name вместо name
             
                     # ---------- Финансовый профиль ----------
                     fin = ck_fin(inn)
@@ -2253,11 +2263,10 @@ def run_ai_insight_tab() -> None:
                                 st.text(ev["raw_text"] or "—")
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
-                    st.subheader("👥 Руководители и интервью")
                     use_legacy_leaders = st.toggle(
                         "Показать расширенный поиск интервью (legacy)",
                         value=False,
-                        key=f"leaders_{idx}"  # <- вместо "leaders_first"
+                        key=f"leaders_tab_{idx}"
                     )
                     
                     if use_legacy_leaders:
