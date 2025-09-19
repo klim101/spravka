@@ -1906,14 +1906,15 @@ def run_ai_insight_tab() -> None:
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
                     
-                    company_info_first = {
-                        "leaders_raw":  (df_companies.loc[0, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
-                        "founders_raw": (df_companies.loc[0, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
+                    company_info_row = {
+                        "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
+                        "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
                     }
                     
+                    # 1) Короткий дайджест (как было)
                     with st.spinner("Ищем интервью (Checko → интернет)…"):
                         dual = build_dual_interviews_from_v2(
-                            first_name, company_info=company_info_first, site_hint=first_site, market=first_mkt
+                            cmp_name, company_info=company_info_row, site_hint=site, market=mkt
                         )
                     
                     fio_checko = ", ".join(dual["names_checko"]) or "нет данных"
@@ -1931,6 +1932,33 @@ def run_ai_insight_tab() -> None:
                         f"</div>",
                         unsafe_allow_html=True,
                     )
+                    
+                    # 2) ⬇️ НОВОЕ: расширенный отчёт (2-шаговый PPLX: кандидаты → раскрытие юрлиц → факты + отдельный раздел «Интервью»)
+                    adv_mode = st.toggle("Расширенный отчёт (бенефициары + факты + интервью)", value=True, key=f"owners_{idx}")
+                    if adv_mode:
+                        with st.spinner("Собираем расширенный отчёт по владельцам/бенефициарам…"):
+                            try:
+                                deep_text = two_step_perplexity_owners_v2(
+                                    cmp_name,
+                                    site_hint=site,
+                                    market=mkt,
+                                    model="sonar",
+                                    recency=None,
+                                    owners_limit=8,
+                                    expand_org_limit=6,
+                                    per_person_tokens=1500,
+                                )
+                                # делаем ссылки кликабельными и сохраняем разметку строк
+                                deep_html = linkify_keep_url(deep_text).replace("\n", "<br>")
+                            except Exception as e:
+                                deep_html = f"<i>Не удалось собрать расширенный отчёт: {html.escape(str(e))}</i>"
+                    
+                        st.markdown(
+                            f"<div style='background:#FFF;border:1px dashed #cbd5e1;border-radius:8px;padding:16px;line-height:1.6'>"
+                            f"{deep_html}"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
 
                     
                     # ─────── конец блока, дальше ваш код (если был) ───────────────────────
@@ -2055,19 +2083,23 @@ def run_ai_insight_tab() -> None:
                     }
                     
                     with st.spinner("Генерируем INVEST SNAPSHOT…"):
-                        inv = get_invest_snapshot_enriched(
+                        inv = get_invest_snapshot(
                             cmp_name,
                             site_hint=site,
-                            company_info=company_info_row,
-                            market=mkt,
                             model="sonar", recency=None, max_tokens=1500
                         )
                     
+                    # вырезаем раздел «Интервью» из Markdown
+                    md_no_interv = _SEC_INTERV_RE.sub("", inv["md"]).strip()
+                    
+                    # делаем ссылки кликабельными и уважаем переносы
+                    html_main = linkify_keep_url(md_no_interv).replace("\n", "<br>")
+                    
                     st.markdown(
-                        f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv['md']}</div>",
+                        f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{html_main}</div>",
                         unsafe_allow_html=True,
                     )
-                    doc = {"summary": inv["md"], "mode": "invest_snapshot"}  # на случай, если где-то ниже нужен doc
+
                     
                     with st.expander("🔧 Отладка (сырой ответ)"):
                         st.text(inv.get("raw") or "—")
@@ -2118,15 +2150,18 @@ def run_ai_insight_tab() -> None:
                     fio_checko = ", ".join(dual.get("names_checko") or []) or "нет данных"
                     fio_inet   = ", ".join(dual.get("names_inet") or [])   or "нет данных"
                     
+                    dig_checko_html = linkify_keep_url(dual.get("digest_checko") or "нет данных").replace("\n", "<br>")
+                    dig_inet_html   = linkify_keep_url(dual.get("digest_inet")   or "нет данных").replace("\n", "<br>")
+                    
                     st.markdown(
                         f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
                         f"<p><b>ФИО (Checko):</b> {html.escape(fio_checko)}</p>"
                         f"<p><b>ФИО (интернет):</b> {html.escape(fio_inet)}</p>"
                         f"<hr style='border:none;border-top:1px solid #eee;margin:10px 0'>"
                         f"<h4 style='margin:6px 0'>Дайджест интервью — Checko</h4>"
-                        f"<div>{(dual.get('digest_checko') or 'нет данных').replace(chr(10), '<br>')}</div>"
+                        f"<div>{dig_checko_html}</div>"
                         f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
-                        f"<div>{(dual.get('digest_inet') or 'нет данных').replace(chr(10), '<br>')}</div>"
+                        f"<div>{dig_inet_html}</div>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
