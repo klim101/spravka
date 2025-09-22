@@ -2085,10 +2085,27 @@ def run_ai_insight_tab() -> None:
                     st.pyplot(fig)
             
                     
+                                      
+                    # ────── Описание компании (INVEST SNAPSHOT, без интервью в выводе) ───────────────────────────
                     
-                    # ────── Описание компании (INVEST SNAPSHOT enriched) ───────────────────────────
+                    # страховка: если паттерн/функция ещё не объявлены — объявим здесь
+                    try:
+                        _SEC_INTERV_RE
+                    except NameError:
+                        import re
+                        _SEC_INTERV_RE = re.compile(
+                            r"(^|\n)###\s*Интервью[^\n]*\n.*?(?=\n###\s|\Z)", flags=re.S | re.I
+                        )
                     
-                    # 1) готoвим people из Checko для этой компании (используем дальше в двух местах)
+                    def strip_interviews_section(md: str) -> str:
+                        """Убирает из Markdown блок '### Интервью …' целиком (до следующего ### или конца)."""
+                        if not md:
+                            return ""
+                        cleaned = _SEC_INTERV_RE.sub("\n", md).strip()
+                        # сжимаем лишние пустые строки
+                        return re.sub(r"\n{3,}", "\n\n", cleaned)
+                    
+                    # 1) готовим people из Checko для этой компании (используем дальше в двух местах)
                     company_info_row = {
                         "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
                         "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
@@ -2100,15 +2117,15 @@ def run_ai_insight_tab() -> None:
                             site_hint=site,
                             model="sonar", recency=None, max_tokens=1500
                         )
+                        # вырезаем раздел «Интервью …» из описания, чтобы он не попадал в блок «Описание компании»
                         inv_clean = strip_interviews_section(inv["md"])
                         inv_html  = linkify_keep_url(inv_clean)
-                        
+                    
                         st.markdown(
                             f"<div style='background:#F7F9FA;border:1px solid #ccc;border-radius:8px;padding:18px;line-height:1.55'>{inv_html}</div>",
                             unsafe_allow_html=True,
                         )
                         doc = {"summary": inv_clean, "mode": "invest_snapshot"}
-
                     
                     with st.expander("🔧 Отладка (сырой ответ)"):
                         st.text(inv.get("raw") or "—")
