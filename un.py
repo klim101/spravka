@@ -8,8 +8,7 @@
 # coding: utf-8
 
 # In[6]:
-#from timesheet_tab import render_timesheet_tab, ensure_db
-#ensure_db()  # создаст таблицы в выбранной БД при первом запуске
+
 
 # Устанавливаем API-ключ OpenAI
 import os
@@ -1412,36 +1411,12 @@ def _pick_ceo(leaders: List[Dict]) -> Optional[Dict]:
 #           НО приведение делаем через _to_percent_strict (без домножений).
 # ─────────────────────────────────────────────────────────────────────────────
 def _shareholders_from_founders(founders: List[Dict]) -> List[Dict]:
-    """
-    Строим таблицу акционеров.
-    1) Берём 'share_pct' как числа (строго без *100).
-    2) Если все доли ≤ 1 и их сумма в диапазоне (0, 1.5] — считаем, что это доли от 1 → умножаем на 100.
-    3) Сортируем по убыванию.
-    """
-    rows_raw = []
+    rows = []
     for p in founders:
         fio = (p.get("fio") or "").strip()
         inn = p.get("inn")
-        share_raw = _to_percent_strict(p.get("share_pct"))  # аккуратно приводим к float, без *100
-        rows_raw.append({"fio": fio, "inn": inn, "share_pct": share_raw})
-
-    # авто-детект масштаба
-    vals = [r["share_pct"] for r in rows_raw if r["share_pct"] is not None]
-    scale = 1.0
-    if vals:
-        max_v = max(vals)
-        ssum = sum(vals)
-        if 0 < max_v <= 1.0 and 0 < ssum <= 1.5:
-            scale = 100.0
-
-    rows = []
-    for r in rows_raw:
-        v = r["share_pct"]
-        rows.append({
-            "fio": r["fio"],
-            "inn": r["inn"],
-            "share_pct": (v * scale) if v is not None else None
-        })
+        share = _to_percent_strict(p.get("share_pct"))  # <— аккуратное приведение, без *100
+        rows.append({"fio": fio, "inn": inn, "share_pct": share})
 
     with_share = [r for r in rows if r["share_pct"] is not None]
     no_share   = [r for r in rows if r["share_pct"] is None]
@@ -1456,8 +1431,9 @@ def _markdown_shareholders_table(rows: List[Dict]) -> str:
     for r in rows:
         fio  = r.get("fio") or ""
         inn  = r.get("inn") or ""
-        val  = r.get("share_pct")
-        share = "" if val is None else f"{float(val):.2f}"
+        share_val = r.get("share_pct")
+        share = ("" if share_val is None 
+                 else f"{float(share_val):.4g}".rstrip("0").rstrip("."))
         lines.append(f"| {fio} | {inn} | {share} |")
     return "\n".join(lines)
 
@@ -2578,7 +2554,26 @@ def run_ai_insight_tab() -> None:
                     st.markdown("**Акционеры**")
                     
                     shareholders = dual.get("shareholders") or []
-                    st.markdown(_markdown_shareholders_table(shareholders))
+                    if shareholders:
+                        sh_lines = ["| ФИО | ИНН | Доля, % |", "|---|---|---|"]
+                        for r in shareholders:
+                            fio   = (r.get("fio") or "").strip()
+                            inn   = r.get("inn") or ""
+                            share = r.get("share_pct")
+                            # аккуратный вывод: до 4 значащих, без лишних нулей/точек
+                            if share is None:
+                                share_str = ""
+                            else:
+                                try:
+                                    share_f = float(str(share).replace(",", "."))
+
+                                    share_str = f"{share_f:.4g}".rstrip("0").rstrip(".")
+                                except Exception:
+                                    share_str = str(share)
+                            sh_lines.append(f"| {fio} | {inn} | {share_str} |")
+                        st.markdown("\n".join(sh_lines))
+                    else:
+                        st.markdown("_нет данных_")
                     
                     # ===== 2) Интервью (HTML с linkify_keep_url) =====
                     digest_checko = sanitize_invest(dual.get("digest_checko") or "нет данных")
@@ -2607,100 +2602,7 @@ def run_ai_insight_tab() -> None:
                             unsafe_allow_html=True,
                         )
 
-                # === Q&A helpers (вставить ОДИН РАЗ выше UI) ===
-                def _kb_collect_sections_for_company(cmp_name: str,
-                                                     leaders_md: str = "",
-                                                     digest_checko: str = "",
-                                                     digest_inet: str = "") -> list[tuple[str,str]]:
-                    kb = []
-                    if leaders_md.strip():
-                        kb.append(("Leaders & Shareholders", leaders_md))
-                    if digest_checko.strip():
-                        kb.append(("Interviews (Checko)", digest_checko))
-                    if digest_inet.strip():
-                        kb.append(("Interviews (Internet)", digest_inet))
-                    return kb
-                
-                def _kb_simple_rank(query: str, sections: list[tuple[str,str]], top_k: int = 3) -> list[tuple[str,str,float]]:
-                    import re
-                    q = [t for t in re.findall(r"\w+", (query or "").lower()) if len(t) > 2]
-                    scored = []
-                    for title, txt in sections:
-                        tokens = re.findall(r"\w+", (txt or "").lower())
-                        score = sum(tokens.count(t) for t in q)
-                        if score > 0:
-                            scored.append((title, txt, float(score)))
-                    scored.sort(key=lambda x: x[2], reverse=True)
-                    return scored[:top_k]
-                
-                _EMP_PATTERNS = [
-                    r"численность\s+сотрудников[:\s\-~]*([0-9\s]+)\s*(?:чел|employees|сотр|сотруд)\b",
-                    r"employees[:\s\-~]*([0-9\s]+)\b",
-                ]
-                
-                def _extract_employee_count(text: str) -> tuple[int | None, str | None]:
-                    import re
-                    t = (text or "")
-                    for pat in _EMP_PATTERNS:
-                        m = re.search(pat, t, flags=re.I)
-                        if m:
-                            raw = re.sub(r"\D", "", m.group(1) or "")
-                            if raw.isdigit():
-                                return int(raw), "regex"
-                    return None, None
-                
-                def _qa_prompt_for_web(company: str, user_q: str, site_hint: str | None = None) -> str:
-                    site = f"Официальный сайт: {site_hint}. " if site_hint else ""
-                    return f"""Ты — ассистент-исследователь. Найди точный ответ на вопрос про компанию «{company}».
-                {site}Дай конкретный факт и дату/период, если важно. ВСЕГДА приводи ПРЯМЫЕ URL (2–4).
-                ANSWER: <короткий ответ>
-                DETAILS: <1–3 уточнения>
-                SOURCES: <URL1>; <URL2>; <URL3>
-                Q: {user_q}""".strip()
-                
-                def ask_guide(company: str, user_q: str, kb_sections: list[tuple[str,str]],
-                              site_hint: str | None = None, allow_web: bool = True) -> dict:
-                    # 1) локально
-                    top_local = _kb_simple_rank(user_q, kb_sections, top_k=3)
-                    merged = "\n\n".join(sec for _, sec, _ in top_local) if top_local else ""
-                    emp_local, how = _extract_employee_count(merged)
-                    if emp_local:
-                        return {
-                            "answer_md": f"**Ответ:** {emp_local:,} чел.".replace(",", " "),
-                            "used": "local",
-                            "sources": [],
-                            "raw": f"LOCAL({how})",
-                            "suggest_patch": {"section":"INVEST SNAPSHOT","md_line": f"**Численность:** {emp_local:,} чел.".replace(",", " ")},
-                        }
-                    # 2) веб
-                    if allow_web:
-                        prompt = _qa_prompt_for_web(company, user_q, site_hint)
-                        raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=800)
-                        cleaned = sanitize_invest(raw)
-                        urls = _extract_urls(cleaned)
-                        emp_web, _ = _extract_employee_count(cleaned)
-                        md_ans = cleaned
-                        suggest = None
-                        if emp_web:
-                            md_ans = f"**Ответ:** {emp_web:,} чел.\n\n{cleaned}".replace(",", " ")
-                            suggest = {"section":"INVEST SNAPSHOT","md_line": f"**Численность:** {emp_web:,} чел.  \nИсточники: " + "; ".join(urls[:3])}
-                        return {"answer_md": md_ans, "used": "web", "sources": urls[:4], "raw": raw, "suggest_patch": suggest}
-                    # 3) нет данных
-                    return {"answer_md":"_Не удалось найти ответ_.","used":"none","sources":[],"raw":"","suggest_patch":None}
-                
-                def insert_or_append_line(md_text: str, section_title: str, new_line_md: str) -> str:
-                    import re
-                    if not new_line_md: return md_text or ""
-                    text = md_text or ""
-                    pat_h = re.compile(rf"(?m)^(#{1,6}\s*{re.escape(section_title)}\s*$)")
-                    pat_b = re.compile(rf"(?m)^\*\*{re.escape(section_title)}\*\*\s*$")
-                    m = pat_h.search(text) or pat_b.search(text)
-                    if m:
-                        pos = m.end()
-                        return text[:pos] + "\n" + new_line_md.strip() + "\n\n" + text[pos:]
-                    return (text + f"\n\n## {section_title}\n{new_line_md.strip()}\n").strip()
 
-                    
                     # ────── Q&A: Спросить справку ─────────────────────────────────────
                     st.markdown("---")
                     st.subheader("🔎 Спросить справку")
@@ -3255,19 +3157,13 @@ def run_news_run_tab() -> None:
 # ─────────────────────────────────────────────────────────
 # 5. Вкладки приложения: добавляем News Run между AI-Insight и Advance Eye
 # ─────────────────────────────────────────────────────────
-tab_ts, tab_ai, tab_news, tab_eye = st.tabs(
-    ["⏱️ Timesheet", "📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"]
-)
-
-#with tab_ts:
-    # nikabot-style форма учёта времени
-    #render_timesheet_tab()
+tab_ai, tab_news, tab_eye = st.tabs(["📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"])
 
 with tab_ai:
-    run_ai_insight_tab()
+    run_ai_insight_tab()   # ← у вас уже определена где-то выше
 
 with tab_news:
-    run_news_run_tab()
+    run_news_run_tab()     # ← новая вкладка
 
 with tab_eye:
     run_advance_eye_tab()
