@@ -1279,31 +1279,74 @@ from typing import Optional, List, Dict, Tuple
 
 _URL_RE = re.compile(r'https?://[^\s<>)"\'\]]+')
 
-# === NEW: нормализация, парсинг Checko и Markdown-таблица акционеров ===
+# --- оставляем как есть ---
 def _norm(s: Optional[str]) -> str:
     import re
     return re.sub(r"\s{2,}", " ", (s or "").strip())
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔️ БЫЛО: _to_float_safe использовался для долей (мы это МЕНЯЕМ)
+# ✅ СТАЛО: для долей используем СТРОГИЙ парсер процентов, без авто-*100
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ❗ НЕ УДАЛЯЙ, если используется где-то ещё (НО: для долей больше не применять)
 def _to_float_safe(x) -> Optional[float]:
     try:
-        if x is None: return None
+        if x is None: 
+            return None
         return float(str(x).replace(",", "."))
     except Exception:
         return None
 
+# ✅ НОВОЕ: строгое приведение к процентам (без домножений/эвристик)
+def _to_percent_strict(x) -> Optional[float]:
+    """
+    '25', '25%', '12,5' -> 25.0
+    0.25 -> 0.25 (т.е. 0.25%, мы НИЧЕГО не домножаем).
+    """
+    try:
+        if x is None:
+            return None
+        s = str(x).strip()
+        if s.endswith("%"):
+            s = s[:-1]
+        s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+# ✅ НОВОЕ: главная точка правды по Checko — Доля.Процент
+def _share_from_checko_dict(item: dict) -> Optional[float]:
+    """
+    Берём строго item['Доля']['Процент'].
+    Если 'Доля' плоская строка/число — пытаемся считать как проценты.
+    Любые другие поля игнорируем (чтобы не вносить «магии»).
+    """
+    d = item.get("Доля")
+    if isinstance(d, dict) and ("Процент" in d):
+        return _to_percent_strict(d.get("Процент"))
+    if "Доля" in item and not isinstance(d, dict):
+        return _to_percent_strict(item.get("Доля"))
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔️ БЫЛО: _parse_checko_cell использовал _to_float_safe(share)
+# ✅ СТАЛО: используем _share_from_checko_dict + _to_percent_strict
+# ─────────────────────────────────────────────────────────────────────────────
 def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
     """
     Превращает leaders_raw / founders_raw в список словарей:
-    {'fio','inn','share_pct','role'}
+      {'fio','inn','share_pct','role'}
+    ЛОГИКА ДОЛИ: строго как в Checko — item['Доля']['Процент'] (или плоская 'Доля').
     """
-    import re
+    import re, ast
     out: List[Dict] = []
 
     def _emit(fio=None, inn=None, share=None, role=None):
         item = {
             "fio": _norm(fio),
             "inn": _norm(str(inn)) if inn else None,
-            "share_pct": _to_float_safe(share),
+            "share_pct": _to_percent_strict(share),  # <— ТУТ ГЛАВНОЕ ИЗМЕНЕНИЕ
             "role": _norm(role or role_hint),
         }
         if item["fio"] or item["inn"]:
@@ -1312,51 +1355,75 @@ def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
     if cell is None:
         return out
 
+    # строка → пробуем распарсить как python-литерал ([{…}] / {...})
     if isinstance(cell, str):
         s = cell.strip()
-        inn = None
+        if not s:
+            return out
+        if s.startswith("[") or s.startswith("{"):
+            try:
+                parsed = ast.literal_eval(s)
+                return _parse_checko_cell(parsed, role_hint=role_hint)
+            except Exception:
+                pass
+        # плоская строка «ФИО (ИНН 123..., доля 25%)»
         m_inn = re.search(r"(?:ИНН|inn)\s*[:№]?\s*([0-9]{8,12})", s, re.I)
-        if m_inn: inn = m_inn.group(1)
+        inn = m_inn.group(1) if m_inn else None
         m_share = re.search(r"(?:доля|share)[^0-9]*([0-9]+[.,]?[0-9]*)\s*%?", s, re.I)
         share = m_share.group(1) if m_share else None
         fio = re.sub(r"\s*\(.*?\)\s*$", "", s).strip()
         _emit(fio=fio, inn=inn, share=share)
         return out
 
+    # dict → берём Доля.Процент (строго)
     if isinstance(cell, dict):
         fio   = cell.get("ФИО") or cell.get("fio")
         inn   = cell.get("ИНН") or cell.get("inn")
-        share = None
-        if isinstance(cell.get("Доля"), dict):
-            share = cell["Доля"].get("Процент")
-        elif "share" in cell:
-            share = cell["share"]
+        share = _share_from_checko_dict(cell)     # <— СТРОГО: только отсюда
         role  = cell.get("Должность") or cell.get("role") or role_hint
         _emit(fio=fio, inn=inn, share=share, role=role)
         return out
 
+    # list → разворачиваем
     if isinstance(cell, list):
         for it in cell:
             out.extend(_parse_checko_cell(it, role_hint=role_hint))
         return out
 
+    # fallback
     _emit(fio=str(cell))
     return out
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔️ БЫЛО: _pick_ceo(leaders) без фолбэка
+# ✅ СТАЛО: можно оставить как есть, но лучше версия с фолбэком (если уже вставлял — ок)
+# ─────────────────────────────────────────────────────────────────────────────
 def _pick_ceo(leaders: List[Dict]) -> Optional[Dict]:
     for p in leaders:
         r = (p.get("role") or "").lower()
         if "генераль" in r or "ген. дир" in r or "гендир" in r or "general director" in r:
             return p
     return leaders[0] if leaders else None
+# Если у тебя уже стоит улучшенная версия с names_fallback — оставь её.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔️ БЫЛО: _shareholders_from_founders делал сортировку — ОСТАВЛЯЕМ,
+#           НО приведение делаем через _to_percent_strict (без домножений).
+# ─────────────────────────────────────────────────────────────────────────────
 def _shareholders_from_founders(founders: List[Dict]) -> List[Dict]:
-    rows = [{"fio": p.get("fio") or "", "inn": p.get("inn"), "share_pct": p.get("share_pct")} for p in founders if (p.get("fio") or p.get("inn"))]
+    rows = []
+    for p in founders:
+        fio = (p.get("fio") or "").strip()
+        inn = p.get("inn")
+        share = _to_percent_strict(p.get("share_pct"))  # <— аккуратное приведение, без *100
+        rows.append({"fio": fio, "inn": inn, "share_pct": share})
+
     with_share = [r for r in rows if r["share_pct"] is not None]
     no_share   = [r for r in rows if r["share_pct"] is None]
     with_share.sort(key=lambda x: x["share_pct"], reverse=True)
     return with_share + no_share
 
+# --- оставляем как есть (таблица уже ожидает проценты) ---
 def _markdown_shareholders_table(rows: List[Dict]) -> str:
     if not rows:
         return "_нет данных_"
@@ -1364,13 +1431,20 @@ def _markdown_shareholders_table(rows: List[Dict]) -> str:
     for r in rows:
         fio  = r.get("fio") or ""
         inn  = r.get("inn") or ""
-        share = ("" if r.get("share_pct") is None else f"{r['share_pct']:.4g}".rstrip("0").rstrip("."))
+        share_val = r.get("share_pct")
+        share = ("" if share_val is None 
+                 else f"{float(share_val):.4g}".rstrip("0").rstrip("."))
         lines.append(f"| {fio} | {inn} | {share} |")
     return "\n".join(lines)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔️ БЫЛО: isinstance(company_info, Dict)
+# ✅ СТАЛО: isinstance(company_info, dict) — typing.Dict нельзя использовать в isinstance()
+# ─────────────────────────────────────────────────────────────────────────────
 def _names_from_checko_rich(company_info: Optional[Dict]) -> Tuple[List[Dict], List[Dict], List[str]]:
     leaders, founders = [], []
-    if isinstance(company_info, Dict):
+    # ↓↓↓ ВАЖНАЯ ПРАВКА: Dict → dict
+    if isinstance(company_info, dict):  # ← ЗАМЕНИТЬ Dict на dict
         leaders = _parse_checko_cell(company_info.get("leaders_raw"), role_hint="руководитель")
         founders = _parse_checko_cell(company_info.get("founders_raw"), role_hint="акционер/учредитель")
     names, seen = [], set()
@@ -1383,6 +1457,7 @@ def _names_from_checko_rich(company_info: Optional[Dict]) -> Tuple[List[Dict], L
                 names.append(fio)
     return leaders, founders, names
 
+# --- дальше всё как было, не трогаем ---
 def _clean_person(s: str) -> str:
     """Убирает хвосты в скобках и лишние пробелы: 'Иванов (ИНН..., доля...)' → 'Иванов'."""
     s = (s or "").strip()
@@ -1415,7 +1490,7 @@ def _names_from_checko(company_info: Optional[Dict]) -> List[str]:
     Достаёт ФИО из dict {'leaders_raw': [...], 'founders_raw': [...]},
     чистит хвосты '(ИНН..., доля ...)', делает дедуп по нижнему регистру.
     """
-    if not isinstance(company_info, dict):
+    if not isinstance(company_info, dict):   # ← тоже поправили на dict
         return []
     raw: List[str] = []
     for k in ("leaders_raw", "founders_raw"):
@@ -2491,8 +2566,7 @@ def run_ai_insight_tab() -> None:
                             else:
                                 try:
                                     share_f = float(str(share).replace(",", "."))
-                                    if 0 < share_f <= 1.0:
-                                        share_f *= 100.0
+
                                     share_str = f"{share_f:.4g}".rstrip("0").rstrip(".")
                                 except Exception:
                                     share_str = str(share)
