@@ -8,8 +8,8 @@
 # coding: utf-8
 
 # In[6]:
-from timesheet_tab import render_timesheet_tab, ensure_db
-ensure_db()  # создаст таблицы в выбранной БД при первом запуске
+#from timesheet_tab import render_timesheet_tab, ensure_db
+#ensure_db()  # создаст таблицы в выбранной БД при первом запуске
 
 # Устанавливаем API-ключ OpenAI
 import os
