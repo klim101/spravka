@@ -2507,11 +2507,18 @@ def run_ai_insight_tab() -> None:
                     
                     blocks = []
                     if digest_checko.strip().lower() != "нет данных":
-                        blocks.append("<h4 style='margin:12px 0 6px'>Дайджест интервью — Checko</h4>"
-                                      f"<div>{linkify_keep_url(digest_checko).replace('\n','<br>')}</div>")
+                        dig_checko_html = linkify_keep_url(digest_checko).replace("\n", "<br>")
+                        blocks.append(
+                            "<h4 style='margin:12px 0 6px'>Дайджест интервью — Checko</h4>"
+                            f"<div>{dig_checko_html}</div>"
+                        )
+                    
                     if digest_inet.strip().lower() != "нет данных":
-                        blocks.append("<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
-                                      f"<div>{linkify_keep_url(digest_inet).replace('\n','<br>')}</div>")
+                        dig_inet_html = linkify_keep_url(digest_inet).replace("\n", "<br>")
+                        blocks.append(
+                            "<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
+                            f"<div>{dig_inet_html}</div>"
+                        )
                     
                     if blocks:
                         st.markdown(
