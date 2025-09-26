@@ -2529,7 +2529,8 @@ def run_ai_insight_tab() -> None:
                         )
 
 
-                         st.markdown("---")
+                    # ────── Q&A: Спросить справку ─────────────────────────────────────
+                    st.markdown("---")
                     st.subheader("🔎 Спросить справку")
                     
                     user_q = st.text_input(
@@ -2539,34 +2540,32 @@ def run_ai_insight_tab() -> None:
                     
                     # Собираем локальный корпус только из того, что реально есть
                     kb_sections = []
-                    # leaders/shareholders + интервью (md)
-                    if isinstance(dual, dict):
-                        # Блок лидеров/акционеров: соберём простой md
-                        leaders_md = ""
-                        if fio_ceo:
-                            inn_txt = f"(ИНН {ceo.get('inn')})" if ceo.get("inn") else ""
-                            leaders_md += f"Генеральный директор: {fio_ceo} {inn_txt}\n"
-                        if shareholders:
-                            # добавим и акционеров в текст (в простом виде)
-                            for r in shareholders:
-                                fio = (r.get("fio") or "").strip()
-                                inn = r.get("inn") or ""
-                                share = r.get("share_pct")
-                                try:
-                                    share_f = float(str(share).replace(",", ".")) if share is not None else None
-                                    if share_f is not None and 0 < share_f <= 1.0:
-                                        share_f *= 100.0
-                                except Exception:
-                                    share_f = None
-                                share_txt = (f"{share_f:.4g}".rstrip('0').rstrip('.') + "%") if share_f is not None else ""
-                                leaders_md += f"- {fio} {f'(ИНН {inn})' if inn else ''} {f'— {share_txt}' if share_txt else ''}\n"
-                            kb_sections.append(("Leaders & Shareholders", leaders_md))
+                    # Блок лидеров/акционеров: соберём простой md
+                    leaders_md = ""
+                    if fio_ceo:
+                        inn_txt = f"(ИНН {ceo.get('inn')})" if ceo.get("inn") else ""
+                        leaders_md += f"Генеральный директор: {fio_ceo} {inn_txt}\n"
+                    if shareholders:
+                        for r in shareholders:
+                            fio = (r.get("fio") or "").strip()
+                            inn = r.get("inn") or ""
+                            share = r.get("share_pct")
+                            try:
+                                share_f = float(str(share).replace(",", ".")) if share is not None else None
+                                if share_f is not None and 0 < share_f <= 1.0:
+                                    share_f *= 100.0
+                            except Exception:
+                                share_f = None
+                            share_txt = (f"{share_f:.4g}".rstrip('0').rstrip('.') + "%") if share_f is not None else ""
+                            leaders_md += f"- {fio}{f' (ИНН {inn})' if inn else ''}{f' — {share_txt}' if share_txt else ''}\n"
+                    if leaders_md:
+                        kb_sections.append(("Leaders & Shareholders", leaders_md))
                     
-                        # интервью
-                        if isinstance(digest_checko, str) and digest_checko.strip().lower() != "нет данных":
-                            kb_sections.append(("Interviews (Checko)", digest_checko))
-                        if isinstance(digest_inet, str) and digest_inet.strip().lower() != "нет данных":
-                            kb_sections.append(("Interviews (Internet)", digest_inet))
+                    # интервью
+                    if isinstance(digest_checko, str) and digest_checko.strip().lower() != "нет данных":
+                        kb_sections.append(("Interviews (Checko)", digest_checko))
+                    if isinstance(digest_inet, str) and digest_inet.strip().lower() != "нет данных":
+                        kb_sections.append(("Interviews (Internet)", digest_inet))
                     
                     # кнопки
                     col_qa1, col_qa2 = st.columns([1,1])
@@ -2588,7 +2587,7 @@ def run_ai_insight_tab() -> None:
                             if qa.get("sources"):
                                 st.caption("Источники: " + " • ".join(qa["sources"]))
                     
-                            # ===== безопасное встраивание в справку (session_state), без привязки к inv =====
+                            # безопасное встраивание в справку (session_state), без привязки к inv
                             suggest = qa.get("suggest_patch")
                             if suggest and col_qa2.button(f"Вставить в раздел: {suggest['section']}", key=f"qa_apply_{idx}"):
                                 ss_key = f"guide_section_{suggest['section']}_{idx}"
