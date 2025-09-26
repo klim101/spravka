@@ -1522,7 +1522,8 @@ def build_dual_interviews(
     leaders, founders, names_checko = _names_from_checko_rich(company_info)
 
     # CEO + акционеры
-    ceo = _pick_ceo(leaders)
+    ceo = _pick_ceo(leaders, names_fallback=names_checko)
+
     shareholders = _shareholders_from_founders(founders)
 
     # 2) Интервью по Checko-именам
@@ -1656,7 +1657,161 @@ def _safe_div(a: float | None, b: float | None) -> float | None:
 
 
 
+def _to_float_safe(x) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        s = str(x).strip()
+        if s.endswith("%"):
+            s = s[:-1]
+        s = s.replace(",", ".")
+        val = float(s)
+        # если дали долю в долях (0.25) — переведём в проценты
+        if 0 < val <= 1.0:
+            val = val * 100.0
+        return val
+    except Exception:
+        return None
 
+def _normalize_share_any(share_obj) -> Optional[float]:
+    """
+    Принимает:
+    - число/строку: '25', '25%', '12,5', 0.25
+    - dict вида {'Процент': 25} или {'Дробь': {'Числитель':1,'Знаменатель':2}}
+    Возвращает процент float или None.
+    """
+    if share_obj is None:
+        return None
+
+    if isinstance(share_obj, dict):
+        # 1) явный процент
+        if "Процент" in share_obj:
+            return _to_float_safe(share_obj.get("Процент"))
+        if "percent" in share_obj:
+            return _to_float_safe(share_obj.get("percent"))
+        # 2) дробь
+        frac = share_obj.get("Дробь") or share_obj.get("fraction")
+        if isinstance(frac, dict):
+            try:
+                num = float(str(frac.get("Числитель") or frac.get("num") or 0).replace(",", "."))
+                den = float(str(frac.get("Знаменатель") or frac.get("den") or 0).replace(",", "."))
+                if den:
+                    return (num / den) * 100.0
+            except Exception:
+                pass
+        # 3) обойдём вложенные ключи
+        for v in share_obj.values():
+            got = _normalize_share_any(v)
+            if got is not None:
+                return got
+        return None
+
+    # число/строка
+    return _to_float_safe(share_obj)
+
+def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
+    """
+    Делает из leaders_raw / founders_raw список:
+      {'fio','inn','share_pct','role'}
+    Поддерживает str | dict | list, разные схемы долей.
+    """
+    import re, ast
+    out: List[Dict] = []
+
+    def _emit(fio=None, inn=None, share=None, role=None):
+        fio = _norm(fio)
+        inn = _norm(str(inn)) if inn else None
+        share_pct = _normalize_share_any(share)
+        item = {"fio": fio, "inn": inn, "share_pct": share_pct, "role": _norm(role or role_hint)}
+        if item["fio"] or item["inn"]:
+            out.append(item)
+
+    if cell is None:
+        return out
+
+    # если строка — попробуем распарсить JSON-подобное
+    if isinstance(cell, str):
+        s = cell.strip()
+        if s.startswith("[") or s.startswith("{"):
+            try:
+                parsed = ast.literal_eval(s)
+                return _parse_checko_cell(parsed, role_hint=role_hint)
+            except Exception:
+                pass
+        # выдернем ИНН/долю из строки
+        m_inn = re.search(r"(?:ИНН|inn)\s*[:№]?\s*([0-9]{8,12})", s, re.I)
+        inn = m_inn.group(1) if m_inn else None
+        m_share = re.search(r"(?:доля|share)[^0-9]*([0-9]+[.,]?[0-9]*)\s*%?", s, re.I)
+        share = m_share.group(1) if m_share else None
+        fio = re.sub(r"\s*\(.*?\)\s*$", "", s).strip()
+        _emit(fio=fio, inn=inn, share=share)
+        return out
+
+    if isinstance(cell, dict):
+        fio   = cell.get("ФИО") or cell.get("fio") or cell.get("name")
+        inn   = cell.get("ИНН") or cell.get("inn") or cell.get("tax_id")
+        # 1) классика Checko: доля может быть dict или «плоская»
+        share = None
+        if isinstance(cell.get("Доля"), dict):
+            share = cell["Доля"]
+        elif "share" in cell:
+            share = cell["share"]
+        elif "Доля" in cell and not isinstance(cell.get("Доля"), dict):
+            share = cell.get("Доля")
+        role  = cell.get("Должность") or cell.get("role") or role_hint
+        _emit(fio=fio, inn=inn, share=share, role=role)
+        return out
+
+    if isinstance(cell, list):
+        for it in cell:
+            out.extend(_parse_checko_cell(it, role_hint=role_hint))
+        return out
+
+    # fallback
+    _emit(fio=str(cell))
+    return out
+
+def _pick_ceo(leaders: List[Dict], names_fallback: Optional[List[str]] = None) -> Optional[Dict]:
+    """
+    Пытаемся найти гендиректора:
+    1) по роли с приоритетом 'генераль';
+    2) по 'директор'/'руководитель'/'CEO';
+    3) иначе первый из leaders;
+    4) иначе фолбэк по первому имени.
+    """
+    if not leaders and names_fallback:
+        return {"fio": names_fallback[0], "inn": None, "share_pct": None, "role": "руководитель"}
+
+    for p in leaders:
+        r = (p.get("role") or "").lower()
+        if "генераль" in r:
+            return p
+    for p in leaders:
+        r = (p.get("role") or "").lower()
+        if any(k in r for k in ("директор", "руковод", "ceo")):
+            return p
+    if leaders:
+        return leaders[0]
+    if names_fallback:
+        return {"fio": names_fallback[0], "inn": None, "share_pct": None, "role": "руководитель"}
+    return None
+
+def _shareholders_from_founders(founders: List[Dict]) -> List[Dict]:
+    """
+    Чистим/сортируем акционеров. Если доля дана в долях (<=1),
+    конвертируем в проценты. Сортируем по убыванию.
+    """
+    rows = []
+    for p in founders:
+        fio = (p.get("fio") or "").strip()
+        inn = p.get("inn")
+        share = _to_float_safe(p.get("share_pct"))  # на случай старых значений
+        rows.append({"fio": fio, "inn": inn, "share_pct": share})
+
+    with_share = [r for r in rows if r["share_pct"] is not None]
+    no_share   = [r for r in rows if r["share_pct"] is None]
+    with_share.sort(key=lambda x: x["share_pct"], reverse=True)
+    return with_share + no_share
 
 
 
@@ -2300,7 +2455,7 @@ def run_ai_insight_tab() -> None:
                     
                     # ────── Руководители и интервью ─────────────────────────────────────
                     st.subheader("👥 Руководители и интервью")
-                
+                    
                     company_info_row = {
                         "leaders_raw":  (df_companies.loc[idx, "leaders_raw"]  if "leaders_raw"  in df_companies.columns else []) or [],
                         "founders_raw": (df_companies.loc[idx, "founders_raw"] if "founders_raw" in df_companies.columns else []) or [],
@@ -2313,13 +2468,16 @@ def run_ai_insight_tab() -> None:
                     
                     # ===== 1) Гендиректор + Акционеры (чистый Markdown) =====
                     ceo = dual.get("ceo") or {}
-                    ceo_line = "_нет данных_"
                     fio_ceo = (ceo.get("fio") or "").strip()
                     if fio_ceo:
                         inn_txt = f"(ИНН {ceo.get('inn')})" if ceo.get("inn") else ""
-                        ceo_line = f"**Генеральный директор:** {fio_ceo} {inn_txt}".strip()
+                        st.markdown(f"**Генеральный директор:** {fio_ceo} {inn_txt}".strip())
+                    else:
+                        st.markdown("_Генеральный директор: нет данных_")
                     
-                    # Таблица акционеров из dual["shareholders"] (оставляем Markdown)
+                    st.markdown("")
+                    st.markdown("**Акционеры**")
+                    
                     shareholders = dual.get("shareholders") or []
                     if shareholders:
                         sh_lines = ["| ФИО | ИНН | Доля, % |", "|---|---|---|"]
@@ -2327,93 +2485,112 @@ def run_ai_insight_tab() -> None:
                             fio   = (r.get("fio") or "").strip()
                             inn   = r.get("inn") or ""
                             share = r.get("share_pct")
-                            try:
-                                share_str = "" if share is None else f"{float(share):.4g}".rstrip("0").rstrip(".")
-                            except Exception:
-                                share_str = str(share) if share is not None else ""
+                            # аккуратный вывод: до 4 значащих, без лишних нулей/точек
+                            if share is None:
+                                share_str = ""
+                            else:
+                                try:
+                                    share_f = float(str(share).replace(",", "."))
+                                    if 0 < share_f <= 1.0:
+                                        share_f *= 100.0
+                                    share_str = f"{share_f:.4g}".rstrip("0").rstrip(".")
+                                except Exception:
+                                    share_str = str(share)
                             sh_lines.append(f"| {fio} | {inn} | {share_str} |")
-                        sh_table_md = "\n".join(sh_lines)
+                        st.markdown("\n".join(sh_lines))
                     else:
-                        sh_table_md = "_нет данных_"
+                        st.markdown("_нет данных_")
                     
-                    st.markdown(ceo_line)
-                    st.markdown("")
-                    st.markdown("**Акционеры**")
-                    st.markdown(sh_table_md)
-                    
-                    # ===== 2) Интервью (HTML с твоим linkify_keep_url) =====
+                    # ===== 2) Интервью (HTML с linkify_keep_url) =====
                     digest_checko = sanitize_invest(dual.get("digest_checko") or "нет данных")
                     digest_inet   = sanitize_invest(dual.get("digest_inet")   or "нет данных")
                     
-                    block_checko = ""
+                    blocks = []
                     if digest_checko.strip().lower() != "нет данных":
-                        dig_checko_html = linkify_keep_url(digest_checko).replace("\n", "<br>")
-                        block_checko = f"<h4 style='margin:12px 0 6px'>Дайджест интервью — Checko</h4><div>{dig_checko_html}</div>"
-                    
-                    block_inet = ""
+                        blocks.append("<h4 style='margin:12px 0 6px'>Дайджест интервью — Checko</h4>"
+                                      f"<div>{linkify_keep_url(digest_checko).replace('\n','<br>')}</div>")
                     if digest_inet.strip().lower() != "нет данных":
-                        dig_inet_html = linkify_keep_url(digest_inet).replace("\n", "<br>")
-                        block_inet = f"<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4><div>{dig_inet_html}</div>"
+                        blocks.append("<h4 style='margin:14px 0 6px'>Дайджест интервью — интернет</h4>"
+                                      f"<div>{linkify_keep_url(digest_inet).replace('\n','<br>')}</div>")
                     
-                    if block_checko or block_inet:
+                    if blocks:
                         st.markdown(
-                            f"<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
-                            f"{block_checko}{block_inet}"
-                            f"</div>",
+                            "<div style='background:#F9FAFB;border:1px solid #ddd;border-radius:8px;padding:18px;line-height:1.6'>"
+                            + "".join(blocks) +
+                            "</div>",
                             unsafe_allow_html=True,
                         )
 
 
-                    st.markdown("---")
+                         st.markdown("---")
                     st.subheader("🔎 Спросить справку")
                     
-                    user_q = st.text_input("Ваш вопрос по компании (например: «найди численность сотрудников»)", key=f"qa_{idx}")
+                    user_q = st.text_input(
+                        "Ваш вопрос по компании (например: «найди численность сотрудников»)",
+                        key=f"qa_{idx}"
+                    )
+                    
+                    # Собираем локальный корпус только из того, что реально есть
+                    kb_sections = []
+                    # leaders/shareholders + интервью (md)
+                    if isinstance(dual, dict):
+                        # Блок лидеров/акционеров: соберём простой md
+                        leaders_md = ""
+                        if fio_ceo:
+                            inn_txt = f"(ИНН {ceo.get('inn')})" if ceo.get("inn") else ""
+                            leaders_md += f"Генеральный директор: {fio_ceo} {inn_txt}\n"
+                        if shareholders:
+                            # добавим и акционеров в текст (в простом виде)
+                            for r in shareholders:
+                                fio = (r.get("fio") or "").strip()
+                                inn = r.get("inn") or ""
+                                share = r.get("share_pct")
+                                try:
+                                    share_f = float(str(share).replace(",", ".")) if share is not None else None
+                                    if share_f is not None and 0 < share_f <= 1.0:
+                                        share_f *= 100.0
+                                except Exception:
+                                    share_f = None
+                                share_txt = (f"{share_f:.4g}".rstrip('0').rstrip('.') + "%") if share_f is not None else ""
+                                leaders_md += f"- {fio} {f'(ИНН {inn})' if inn else ''} {f'— {share_txt}' if share_txt else ''}\n"
+                            kb_sections.append(("Leaders & Shareholders", leaders_md))
+                    
+                        # интервью
+                        if isinstance(digest_checko, str) and digest_checko.strip().lower() != "нет данных":
+                            kb_sections.append(("Interviews (Checko)", digest_checko))
+                        if isinstance(digest_inet, str) and digest_inet.strip().lower() != "нет данных":
+                            kb_sections.append(("Interviews (Internet)", digest_inet))
+                    
+                    # кнопки
                     col_qa1, col_qa2 = st.columns([1,1])
                     
-                    if col_qa1.button("Искать ответ", key=f"qa_go_{idx}") and user_q.strip():
-                        # Собираем локальный корпус
-                        kb_sections = _kb_collect_sections_for_company(
-                            cmp_name,
-                            inv_md = inv.get("md") if isinstance(inv, dict) and "md" in inv else None,   # если у тебя inv_html/md выше в коде — подставь его сюда
-                            owners_md = None,        # сюда можно вложить текст по бенефициарам, если он у тебя где-то есть
-                            leaders_md = dual.get("md_block"),  # наш блок с гендиром/акционерами/интервью
-                            interviews_md = dual.get("digest_checko", "") + "\n\n" + dual.get("digest_inet",""),
-                            extra_sections = None
-                        )
-                    
-                        with st.spinner("Ищу ответ…"):
+                    if col_qa1.button("Искать ответ", key=f"qa_go_{idx}") and (user_q or "").strip():
+                        try:
                             qa = ask_guide(
                                 company=cmp_name,
-                                user_q=user_q,
+                                user_q=user_q.strip(),
                                 kb_sections=kb_sections,
                                 site_hint=site,
                                 allow_web=True
                             )
+                            ans_html = linkify_keep_url(qa.get("answer_md") or "").replace("\n", "<br>")
+                            st.markdown(
+                                f"<div style='background:#F6F8FA;border:1px solid #e2e8f0;border-radius:8px;padding:14px;line-height:1.6'>{ans_html}</div>",
+                                unsafe_allow_html=True
+                            )
+                            if qa.get("sources"):
+                                st.caption("Источники: " + " • ".join(qa["sources"]))
                     
-                        # Покажем ответ + источники
-                        ans_html = linkify_keep_url(qa["answer_md"]).replace("\n", "<br>")
-                        st.markdown(
-                            f"<div style='background:#F6F8FA;border:1px solid #e2e8f0;border-radius:8px;padding:14px;line-height:1.6'>{ans_html}</div>",
-                            unsafe_allow_html=True
-                        )
-                        if qa.get("sources"):
-                            st.caption("Источники: " + " • ".join(qa["sources"]))
-                    
-                        # Кнопка «Внести в справку»
-                        if qa.get("suggest_patch"):
-                            sec = qa["suggest_patch"]["section"]
-                            line = qa["suggest_patch"]["md_line"]
-                            if col_qa2.button(f"Вставить в раздел: {sec}", key=f"qa_apply_{idx}"):
-                                # пример: обновляем INVEST SNAPSHOT (если он у тебя в inv_html/md)
-                                try:
-                                    current_inv_md = inv.get("md") if isinstance(inv, dict) else ""
-                                    updated_inv_md = insert_or_append_line(current_inv_md, sec, line)
-                                    # сохраним обратно (и перерендерим, если у тебя рендерится из inv_html)
-                                    if isinstance(inv, dict):
-                                        inv["md"] = updated_inv_md
-                                    st.success("Добавлено в справку.")
-                                except Exception as e:
-                                    st.error(f"Не удалось вставить: {e}")
+                            # ===== безопасное встраивание в справку (session_state), без привязки к inv =====
+                            suggest = qa.get("suggest_patch")
+                            if suggest and col_qa2.button(f"Вставить в раздел: {suggest['section']}", key=f"qa_apply_{idx}"):
+                                ss_key = f"guide_section_{suggest['section']}_{idx}"
+                                cur_md = st.session_state.get(ss_key, "")
+                                new_md = insert_or_append_line(cur_md, suggest["section"], suggest["md_line"])
+                                st.session_state[ss_key] = new_md  # можно потом отрендерить где нужно
+                                st.success("Добавлено в локальную копию справки (session_state).")
+                        except Exception as e:
+                            st.error(f"Не удалось выполнить поиск: {e}")
 
 
 
@@ -2585,6 +2762,22 @@ def insert_or_append_line(md_text: str, section_title: str, new_line_md: str) ->
 # ==============================================================================
 # === NEWS RUN (last N days, multi-company, NO auto-matrix, NO ```text) ========
 # ==============================================================================
+import re, io
+import pandas as pd
+from datetime import date, timedelta
+from typing import Optional, Tuple, List, Iterable    
+
+
+API_URL_PPLX_NEWS = "https://api.perplexity.ai/chat/completions"
+
+# ==============================================================================
+# === NEWS RUN (таблица, N=15 по умолчанию, multi-company) =====================
+# ==============================================================================
+
+import re, io
+import pandas as pd
+from datetime import date, timedelta
+from typing import Optional, Tuple, List, Iterable
 
 API_URL_PPLX_NEWS = "https://api.perplexity.ai/chat/completions"
 
@@ -2592,7 +2785,6 @@ class PPLXNewsError(Exception):
     pass
 
 def _get_pplx_key_news() -> str:
-    # читаем из окружения или st.secrets, не логируем
     key = (os.getenv("SONAR_API_KEY") or os.getenv("PPLX_API_KEY") or
            os.getenv("PERPLEXITY_API_KEY") or st.secrets.get("SONAR_API_KEY", "")).strip()
     if (not key.startswith("pplx-")) or (len(key) < 40) or key.endswith("..."):
@@ -2611,7 +2803,7 @@ def call_pplx_news(
         "Authorization": f"Bearer {_get_pplx_key_news()}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "news-run-multi/1.0",
+        "User-Agent": "news-run-multi/1.1",
     }
     payload = {
         "model": model,
@@ -2658,88 +2850,6 @@ def sanitize_news(text: str) -> str:
     return "\n".join(out).strip()
 
 _PAR_SPLIT_NEWS = re.compile(r"(?=^Источник:\s*)", flags=re.IGNORECASE | re.MULTILINE)
-_DATE_RE_NEWS    = re.compile(r"Дата:\s*(\d{4}-\d{2}-\d{2})")
-_URL_RE_NEWS     = re.compile(r"URL:\s*([^\s]+)", re.IGNORECASE)
-
-def _parse_date_safe_news(s: str) -> Optional[date]:
-    try:
-        y, m, d = map(int, s.split("-"))
-        return date(y, m, d)
-    except Exception:
-        return None
-
-_MATRIX_HEADER_RE_NEWS = re.compile(
-    r"^Дата\s*\|\s*Издатель\s*\|\s*Заголовок\s*\|\s*Упоминания\s*\|\s*URL\s*$",
-    flags=re.IGNORECASE | re.MULTILINE
-)
-
-def _extract_matrix_news(text: str) -> Tuple[Optional[str], List[str]]:
-    m = _MATRIX_HEADER_RE_NEWS.search(text or "")
-    if not m:
-        return None, []
-    lines = (text or "").splitlines()
-    start = m.start()
-    header_idx, acc = None, 0
-    for i, ln in enumerate(lines):
-        acc += len(ln) + 1
-        if acc > start:
-            header_idx = i
-            break
-    if header_idx is None:
-        return None, []
-    header = lines[header_idx].strip()
-    rows = []
-    for ln in lines[header_idx+1:]:
-        if not ln.strip():
-            break
-        rows.append(ln.rstrip())
-    return header, rows
-
-def _filter_matrix_rows_news(rows: List[str], since: date, until: date) -> List[str]:
-    out = []
-    for ln in rows:
-        m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})\s*\|", ln)
-        if not m:
-            continue
-        dt = _parse_date_safe_news(m.group(1))
-        if dt and since <= dt <= until:
-            out.append(ln)
-    return out
-
-def filter_output_by_window_news(text: str, since: date, until: date) -> str:
-    kept_pars: List[str] = []
-    for p in [p.strip() for p in _PAR_SPLIT_NEWS.split(text or "") if p.strip()]:
-        m = _DATE_RE_NEWS.search(p)
-        if not m:
-            continue
-        dt = _parse_date_safe_news(m.group(1))
-        if dt and since <= dt <= until:
-            kept_pars.append(p)
-    header, rows = _extract_matrix_news(text)
-    filtered_matrix = ""
-    if header and rows:
-        fr = _filter_matrix_rows_news(rows, since, until)
-        if fr:
-            filtered_matrix = "\n".join([header] + fr)
-    if not kept_pars and not filtered_matrix:
-        return ""
-    out = "\n".join(kept_pars) if kept_pars else ""
-    if filtered_matrix:
-        out = (out + ("\n\n" if out else "") + filtered_matrix)
-    return out
-
-def _dedup_by_url_news(paragraphs: List[str]) -> List[str]:
-    seen, out = set(), []
-    for p in paragraphs:
-        m = _URL_RE_NEWS.search(p)
-        url = m.group(1).strip() if m else ""
-        if url and url not in seen:
-            seen.add(url)
-            out.append(p)
-    return out
-
-def _split_paragraphs_news(text: str) -> List[str]:
-    return [p.strip() for p in _PAR_SPLIT_NEWS.split(text or "") if p.strip()]
 
 def _normalize_companies_news(company: Iterable[str] | str | None) -> List[str]:
     if company is None:
@@ -2757,6 +2867,7 @@ def _normalize_companies_news(company: Iterable[str] | str | None) -> List[str]:
             out.append(c)
     return out
 
+# -------- новый формат промпта: одна строка с ключами через " | " --------------
 def build_news_prompt_window(
     company: str,
     country: str,
@@ -2766,34 +2877,88 @@ def build_news_prompt_window(
     keywords: list[str] | None = None,
 ) -> str:
     user_terms = [k.strip() for k in (keywords or []) if k and k.strip()]
-    # компания всегда добавляется как отдельный термин-якорь
-    search_terms = [company] + user_terms
-    # убираем дубли, сохраняем порядок
-    term_hint = ", ".join(dict.fromkeys([t for t in search_terms if t]))
+    # компания добавляется как «якорь»
+    term_hint = ", ".join(dict.fromkeys([company] + user_terms))
 
     return f"""
-Сделай новостной дайджест про «{company}» и соседнюю тематику в стране {country}.
-Фильтр по дате: включай ТОЛЬКО публикации в диапазоне [{since.isoformat()} … {until.isoformat()}] включительно.
-Ключевые термины/бренды для поиска: {term_hint}.
+Сделай новостной дайджест про «{company}» в стране {country}.
+Включай ТОЛЬКО публикации в диапазоне [{since.isoformat()} … {until.isoformat()}] включительно.
+Ищи по терминам: {term_hint}
 
-ФОРМАТ КАЖДОГО АБЗАЦА (строго; абзац НАЧИНАЕТСЯ с 'Источник:'):
-"Источник: <издатель>. <title>. Ключевое: <1–2 предложения с фактами/цифрами>. Дата: <YYYY-MM-DD>. URL: <прямой_линк>."
-— Отдай минимум {min_items} материалов (разные домены по возможности).
-— Если релевантных новостей строго в окне мало — включи меньше, НО НЕ выходи за пределы дат и не придумывай новости.
+СТРОГО ОДНА СТРОКА на материал, начинай с 'Источник:' и используй ключи в таком порядке (через ' | '):
+Источник: <издатель> | Дата: <YYYY-MM-DD> | Заголовок: <title> | Ключевое: <1–2 факта/цифры> | URL: <прямой_линк>
+
+— Дай минимум {min_items} материалов (если релевантных меньше — верни сколько есть, но не выходи за пределы даты и не придумывай).
+— Ссылки должны быть прямыми (https://...).
+— Не упоминай владельцев/ИНН/ОГРН.
 """.strip()
 
+# -------- фильтрация и дедуп по окну/URL --------------------------------------
+_DATE_RE_NEWS = re.compile(r"\bДата:\s*(\d{4}-\d{2}-\d{2})\b")
+_URL_RE_NEWS  = re.compile(r"\bURL:\s*([^\s|]+)")
+_PUB_RE       = re.compile(r"^Источник:\s*(.*?)\s*\|", flags=re.I|re.S)
+_TITLE_RE     = re.compile(r"\bЗаголовок:\s*(.*?)\s*\|\s*Ключевое:", flags=re.I|re.S)
+_KEY_RE       = re.compile(r"\bКлючевое:\s*(.*?)\s*\|\s*URL:", flags=re.I|re.S)
+
+def _parse_date_safe_news(s: str) -> Optional[date]:
+    try:
+        y, m, d = map(int, s.split("-"))
+        return date(y, m, d)
+    except Exception:
+        return None
+
+def filter_output_by_window_news(text: str, since: date, until: date) -> str:
+    kept = []
+    for p in [p.strip() for p in _PAR_SPLIT_NEWS.split(text or "") if p.strip()]:
+        m = _DATE_RE_NEWS.search(p)
+        if not m:
+            continue
+        dt = _parse_date_safe_news(m.group(1))
+        if dt and since <= dt <= until:
+            kept.append(p)
+    return "\n".join(kept)
+
+def _dedup_by_url_news(paragraphs: List[str]) -> List[str]:
+    seen, out = set(), []
+    for p in paragraphs:
+        m = _URL_RE_NEWS.search(p)
+        url = m.group(1).strip() if m else ""
+        if url and url not in seen:
+            seen.add(url)
+            out.append(p)
+    return out
+
+def _split_paragraphs_news(text: str) -> List[str]:
+    return [p.strip() for p in _PAR_SPLIT_NEWS.split(text or "") if p.strip()]
+
+# -------- парсим в строки таблицы ---------------------------------------------
+def parse_news_rows(text: str) -> list[dict]:
+    rows = []
+    for p in _split_paragraphs_news(text):
+        try:
+            dt = _DATE_RE_NEWS.search(p).group(1)
+            title = _TITLE_RE.search(p).group(1).strip()
+            key   = _KEY_RE.search(p).group(1).strip()
+            url   = _URL_RE_NEWS.search(p).group(1).strip()
+            pub_m = _PUB_RE.search(p)
+            pub   = pub_m.group(1).strip() if pub_m else ""
+            rows.append({"Дата": dt, "Заголовок": title, "Ключевое": key, "Ссылка": url, "Издатель": pub})
+        except Exception:
+            # пропускаем криво сформированный абзац
+            continue
+    return rows
+
+# -------- основная функция: всегда таргет = 15 --------------------------------
 def news_run_last_days(
-    company: Iterable[str] | str | None = None,  # ← ПОЛЬЗОВАТЕЛЬ ДОЛЖЕН ВВЕСТИ
+    company: Iterable[str] | str | None = None,   # пользователь вводит
     country: str = "Россия",
     last_days: int = 31,
-    min_items: int = 10,
     keywords: str | list[str] | None = None,
     model: str = "sonar",
 ) -> str:
     today = date.today()
     since = today - timedelta(days=last_days)
     companies = _normalize_companies_news(company)
-
     if not companies:
         raise ValueError("Список компаний пуст. Укажите минимум одну компанию/сущность.")
 
@@ -2803,14 +2968,14 @@ def news_run_last_days(
     else:
         kw = [str(k).strip() for k in (keywords or []) if str(k).strip()]
 
+    TARGET = 15  # ← фиксированное количество на весь вывод
     n = len(companies)
-    base = max(1, min_items // n)
-    extra = max(0, min_items - base * n)
+    base = max(1, TARGET // n)
+    extra = max(0, TARGET - base * n)
 
     recency = "week" if last_days <= 7 else ("month" if last_days <= 31 else "year")
 
     all_pars: List[str] = []
-
     for idx, comp in enumerate(companies):
         need = base + (1 if idx < extra else 0)
         prompt = build_news_prompt_window(comp, country, since, today, need, keywords=kw)
@@ -2819,28 +2984,19 @@ def news_run_last_days(
         filtered = filter_output_by_window_news(clean, since, today)
         if not filtered:
             continue
-        pars = _split_paragraphs_news(filtered)
-        all_pars.extend(pars)
+        all_pars.extend(_split_paragraphs_news(filtered))
 
     if not all_pars:
         return f"[Окно дат: {since.isoformat()} — {today.isoformat()}]\n\nнет свежих новостей в заданном окне."
 
-    all_pars = _dedup_by_url_news(all_pars)
-    all_pars = all_pars[:min_items]
+    # дедуп по URL и ограничение до TARGET
+    all_pars = _dedup_by_url_news(all_pars)[:TARGET]
 
-    body = "\n\n".join(all_pars)
     header = f"[Окно дат: {since.isoformat()} — {today.isoformat()}] Компании: {', '.join(companies)}"
+    body = "\n".join(all_pars)
     return header + "\n\n" + body
 
-# ─────────────────────────────────────────────────────────
-# 3. Инициализируем состояние (один раз за сессию)
-# ─────────────────────────────────────────────────────────
-st.session_state.setdefault("ai_prog", None)   # float 0…1 или None
-st.session_state.setdefault("ai_done", False)  # отчёт готов?
-
-# ─────────────────────────────────────────────────────────
-# 4. Вкладка 🗞 News Run (UI)
-# ─────────────────────────────────────────────────────────
+# -------- UI вкладка: рисуем таблицу с кликабельной ссылкой -------------------
 def run_news_run_tab() -> None:
     st.header("🗞 News Run")
 
@@ -2853,7 +3009,6 @@ def run_news_run_tab() -> None:
         )
     with c2:
         last_days = st.number_input("За сколько дней искать", min_value=1, max_value=365, value=31, step=1)
-        min_items = st.number_input("Мин. новостей на выходе", min_value=1, max_value=200, value=20, step=1)
     with c3:
         country = st.text_input("Страна", value="Россия")
 
@@ -2863,7 +3018,7 @@ def run_news_run_tab() -> None:
         height=120
     )
 
-    col_run, col_dl = st.columns([1,1])
+    col_run, col_dl_txt, col_dl_csv = st.columns([1,1,1])
     if col_run.button("Запустить дайджест"):
         companies = [x.strip() for x in re.split(r"[;,|\n]", companies_raw or "") if x.strip()]
         if not companies:
@@ -2877,21 +3032,47 @@ def run_news_run_tab() -> None:
                     company=companies,
                     country=country,
                     last_days=int(last_days),
-                    min_items=int(min_items),
                     keywords=keywords,
                     model="sonar",
                 )
-            st.code(text, language="markdown")
 
-            buf = io.BytesIO(text.encode("utf-8"))
-            col_dl.download_button(
+            # Парсим в строки таблицы
+            rows = parse_news_rows(text)
+            if not rows:
+                st.warning("Не удалось распарсить новости в таблицу. Показываю сырой текст.")
+                st.code(text, language="markdown")
+                return
+
+            # Сортировка по дате (по убыванию)
+            df = pd.DataFrame(rows)
+            # убеждаемся, что формат YYYY-MM-DD — отсортируем и оставим строкой
+            df["_sort"] = pd.to_datetime(df["Дата"], errors="coerce")
+            df = df.sort_values("_sort", ascending=False).drop(columns=["_sort"])
+
+            st.dataframe(
+                df[["Дата", "Заголовок", "Ключевое", "Ссылка"]],
+                use_container_width=True,
+                column_config={
+                    "Ссылка": st.column_config.LinkColumn("Ссылка", help="Открыть источник"),
+                }
+            )
+
+            # Кнопки выгрузки
+            col_dl_txt.download_button(
                 "Скачать TXT",
-                data=buf,
+                data=io.BytesIO(text.encode("utf-8")),
                 file_name=f"news_run_{date.today().isoformat()}.txt",
                 mime="text/plain"
             )
+            col_dl_csv.download_button(
+                "Скачать CSV",
+                data=io.BytesIO(df.to_csv(index=False).encode("utf-8")),
+                file_name=f"news_run_{date.today().isoformat()}.csv",
+                mime="text/csv"
+            )
         except (PPLXNewsError, ValueError) as e:
             st.error(str(e))
+
 
 # ─────────────────────────────────────────────────────────
 # 5. Вкладки приложения: добавляем News Run между AI-Insight и Advance Eye
