@@ -3259,9 +3259,9 @@ tab_ts, tab_ai, tab_news, tab_eye = st.tabs(
     ["⏱️ Timesheet", "📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"]
 )
 
-with tab_ts:
-    # nikabot-style форма учёта времени
-    render_timesheet_tab()
+#with tab_ts:
+   # nikabot-style форма учёта времени
+   # render_timesheet_tab()
 
 with tab_ai:
     run_ai_insight_tab()
