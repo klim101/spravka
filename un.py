@@ -1272,38 +1272,72 @@ def get_market_evidence(
 
 
 
-# === Leaders & Interviews (2-pass, Sonar-only, no cache) ======================
-# === Leaders & Interviews (2-pass, Sonar-only, no cache) ======================
-# Использует только: re, html, typing, _pplx_call_invest, sanitize_invest
+# === Leaders & Interviews (2-pass + union, Sonar-only, no cache) ==============
+# Использует: re, html, typing, _pplx_call_invest
 import re, html
 from typing import Optional, List, Dict, Tuple
 
 _URL_RE = re.compile(r'https?://[^\s<>)"\'\]]+')
 
-# --- оставляем как есть ---
+# ─────────────────────────────────────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────────────────────────────────────
 def _norm(s: Optional[str]) -> str:
     import re
     return re.sub(r"\s{2,}", " ", (s or "").strip())
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ⛔️ БЫЛО: _to_float_safe использовался для долей (мы это МЕНЯЕМ)
-# ✅ СТАЛО: для долей используем СТРОГИЙ парсер процентов, без авто-*100
-# ─────────────────────────────────────────────────────────────────────────────
+def _extract_urls(text: str) -> List[str]:
+    """Извлекает уникальные URL в порядке появления."""
+    return list(dict.fromkeys(_URL_RE.findall(text or "")))
 
-# ❗ НЕ УДАЛЯЙ, если используется где-то ещё (НО: для долей больше не применять)
+def _dedup_urls_in_paragraph(paragraph: str) -> str:
+    """
+    Режем по «;», оставляем первую запись с каждым уникальным URL.
+    Возвращаем склеенный абзац тем же разделителем.
+    """
+    seen, out = set(), []
+    for part in re.split(r"\s*;\s*", (paragraph or "").strip()):
+        if not part:
+            continue
+        u = next(iter(_extract_urls(part)), None)
+        if (not u) or (u not in seen):
+            out.append(part.strip())
+            if u:
+                seen.add(u)
+    return "; ".join(out)
+
+def _clean_person(s: str) -> str:
+    """Убирает хвосты в скобках и лишние пробелы: 'Иванов (ИНН..., доля...)' → 'Иванов'."""
+    s = (s or "").strip()
+    s = re.sub(r"\s*\(.*?\)\s*$", "", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s
+
+def _domain_from_site(site_hint: Optional[str]) -> str:
+    if not site_hint:
+        return ""
+    m = re.search(r"^(?:https?://)?([^/]+)", site_hint.strip(), re.I)
+    return (m.group(1) if m else "").lower()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Доли / проценты (строгая трактовка для таблицы)
+# ─────────────────────────────────────────────────────────────────────────────
 def _to_float_safe(x) -> Optional[float]:
+    """
+    Оставляем для совместимости (НЕ использовать для долей).
+    Приводит строку/число к float без логики *100.
+    """
     try:
-        if x is None: 
+        if x is None:
             return None
         return float(str(x).replace(",", "."))
     except Exception:
         return None
 
-# ✅ НОВОЕ: строгое приведение к процентам (без домножений/эвристик)
 def _to_percent_strict(x) -> Optional[float]:
     """
     '25', '25%', '12,5' -> 25.0
-    0.25 -> 0.25 (т.е. 0.25%, мы НИЧЕГО не домножаем).
+    0.25 -> 0.25 (это 0.25%, НИЧЕГО не домножаем).
     """
     try:
         if x is None:
@@ -1316,12 +1350,10 @@ def _to_percent_strict(x) -> Optional[float]:
     except Exception:
         return None
 
-# ✅ НОВОЕ: главная точка правды по Checko — Доля.Процент
 def _share_from_checko_dict(item: dict) -> Optional[float]:
     """
-    Берём строго item['Доля']['Процент'].
-    Если 'Доля' плоская строка/число — пытаемся считать как проценты.
-    Любые другие поля игнорируем (чтобы не вносить «магии»).
+    Строго берём item['Доля']['Процент'] или плоскую 'Доля' как проценты.
+    Никаких эвристик.
     """
     d = item.get("Доля")
     if isinstance(d, dict) and ("Процент" in d):
@@ -1331,23 +1363,22 @@ def _share_from_checko_dict(item: dict) -> Optional[float]:
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ⛔️ БЫЛО: _parse_checko_cell использовал _to_float_safe(share)
-# ✅ СТАЛО: используем _share_from_checko_dict + _to_percent_strict
+# Разбор Checko-ячейки в нормализованные записи персон
 # ─────────────────────────────────────────────────────────────────────────────
 def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
     """
     Превращает leaders_raw / founders_raw в список словарей:
       {'fio','inn','share_pct','role'}
-    ЛОГИКА ДОЛИ: строго как в Checko — item['Доля']['Процент'] (или плоская 'Доля').
+    ЛОГИКА ДОЛЕЙ — строго как в Checko: 'Доля.Процент' (или плоская 'Доля').
     """
-    import re, ast
+    import ast
     out: List[Dict] = []
 
     def _emit(fio=None, inn=None, share=None, role=None):
         item = {
             "fio": _norm(fio),
             "inn": _norm(str(inn)) if inn else None,
-            "share_pct": _to_percent_strict(share),  # <— ТУТ ГЛАВНОЕ ИЗМЕНЕНИЕ
+            "share_pct": _to_percent_strict(share),
             "role": _norm(role or role_hint),
         }
         if item["fio"] or item["inn"]:
@@ -1356,7 +1387,7 @@ def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
     if cell is None:
         return out
 
-    # строка → пробуем распарсить как python-литерал ([{…}] / {...})
+    # строка → пытаемся распарсить как литерал ([{…}] / {...}), иначе вытаскиваем хвосты
     if isinstance(cell, str):
         s = cell.strip()
         if not s:
@@ -1367,7 +1398,6 @@ def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
                 return _parse_checko_cell(parsed, role_hint=role_hint)
             except Exception:
                 pass
-        # плоская строка «ФИО (ИНН 123..., доля 25%)»
         m_inn = re.search(r"(?:ИНН|inn)\s*[:№]?\s*([0-9]{8,12})", s, re.I)
         inn = m_inn.group(1) if m_inn else None
         m_share = re.search(r"(?:доля|share)[^0-9]*([0-9]+[.,]?[0-9]*)\s*%?", s, re.I)
@@ -1376,16 +1406,16 @@ def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
         _emit(fio=fio, inn=inn, share=share)
         return out
 
-    # dict → берём Доля.Процент (строго)
+    # dict → читаем расширенный набор ключей
     if isinstance(cell, dict):
-        fio   = cell.get("ФИО") or cell.get("fio")
-        inn   = cell.get("ИНН") or cell.get("inn")
-        share = _share_from_checko_dict(cell)     # <— СТРОГО: только отсюда
+        fio   = cell.get("ФИО") or cell.get("fio") or cell.get("name")
+        inn   = cell.get("ИНН") or cell.get("inn") or cell.get("tax_id")
+        share = _share_from_checko_dict(cell)
         role  = cell.get("Должность") or cell.get("role") or role_hint
         _emit(fio=fio, inn=inn, share=share, role=role)
         return out
 
-    # list → разворачиваем
+    # list → рекурсивно
     if isinstance(cell, list):
         for it in cell:
             out.extend(_parse_checko_cell(it, role_hint=role_hint))
@@ -1395,37 +1425,42 @@ def _parse_checko_cell(cell, role_hint: Optional[str] = None) -> List[Dict]:
     _emit(fio=str(cell))
     return out
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ⛔️ БЫЛО: _pick_ceo(leaders) без фолбэка
-# ✅ СТАЛО: можно оставить как есть, но лучше версия с фолбэком (если уже вставлял — ок)
-# ─────────────────────────────────────────────────────────────────────────────
-def _pick_ceo(leaders: List[Dict]) -> Optional[Dict]:
+def _pick_ceo(leaders: List[Dict], names_fallback: Optional[List[str]] = None) -> Optional[Dict]:
+    """
+    Пытаемся найти гендиректора:
+      1) по 'генераль';
+      2) по 'директор'/'руковод'/'ceo';
+      3) иначе первый из leaders;
+      4) иначе фолбэк по первому имени.
+    """
     for p in leaders:
         r = (p.get("role") or "").lower()
         if "генераль" in r or "ген. дир" in r or "гендир" in r or "general director" in r:
             return p
-    return leaders[0] if leaders else None
-# Если у тебя уже стоит улучшенная версия с names_fallback — оставь её.
+    for p in leaders:
+        r = (p.get("role") or "").lower()
+        if any(k in r for k in ("директор", "руковод", "ceo")):
+            return p
+    if leaders:
+        return leaders[0]
+    if names_fallback:
+        return {"fio": names_fallback[0], "inn": None, "share_pct": None, "role": "руководитель"}
+    return None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ⛔️ БЫЛО: _shareholders_from_founders делал сортировку — ОСТАВЛЯЕМ,
-#           НО приведение делаем через _to_percent_strict (без домножений).
-# ─────────────────────────────────────────────────────────────────────────────
 def _shareholders_from_founders(founders: List[Dict]) -> List[Dict]:
     """
-    Строим таблицу акционеров.
-    1) Берём 'share_pct' как числа (строго без *100).
-    2) Если все доли ≤ 1 и их сумма в диапазоне (0, 1.5] — считаем, что это доли от 1 → умножаем на 100.
-    3) Сортируем по убыванию.
+    Готовим таблицу акционеров:
+      — приводим доли строго (без *100),
+      — auto-scale: если все ≤1 и сумма ≤1.5 — считаем доли от 1 → *100,
+      — сортируем по убыванию.
     """
     rows_raw = []
     for p in founders:
         fio = (p.get("fio") or "").strip()
         inn = p.get("inn")
-        share_raw = _to_percent_strict(p.get("share_pct"))  # аккуратно приводим к float, без *100
+        share_raw = _to_percent_strict(p.get("share_pct"))
         rows_raw.append({"fio": fio, "inn": inn, "share_pct": share_raw})
 
-    # авто-детект масштаба
     vals = [r["share_pct"] for r in rows_raw if r["share_pct"] is not None]
     scale = 1.0
     if vals:
@@ -1448,7 +1483,6 @@ def _shareholders_from_founders(founders: List[Dict]) -> List[Dict]:
     with_share.sort(key=lambda x: x["share_pct"], reverse=True)
     return with_share + no_share
 
-# --- оставляем как есть (таблица уже ожидает проценты) ---
 def _markdown_shareholders_table(rows: List[Dict]) -> str:
     if not rows:
         return "_нет данных_"
@@ -1462,13 +1496,11 @@ def _markdown_shareholders_table(rows: List[Dict]) -> str:
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ⛔️ БЫЛО: isinstance(company_info, Dict)
-# ✅ СТАЛО: isinstance(company_info, dict) — typing.Dict нельзя использовать в isinstance()
+# Имена из Checko (богатая версия → leaders/founders + dedup ФИО)
 # ─────────────────────────────────────────────────────────────────────────────
 def _names_from_checko_rich(company_info: Optional[Dict]) -> Tuple[List[Dict], List[Dict], List[str]]:
     leaders, founders = [], []
-    # ↓↓↓ ВАЖНАЯ ПРАВКА: Dict → dict
-    if isinstance(company_info, dict):  # ← ЗАМЕНИТЬ Dict на dict
+    if isinstance(company_info, dict):
         leaders = _parse_checko_cell(company_info.get("leaders_raw"), role_hint="руководитель")
         founders = _parse_checko_cell(company_info.get("founders_raw"), role_hint="акционер/учредитель")
     names, seen = [], set()
@@ -1477,57 +1509,15 @@ def _names_from_checko_rich(company_info: Optional[Dict]) -> Tuple[List[Dict], L
         if fio:
             k = fio.lower()
             if k not in seen:
-                seen.add(k)
-                names.append(fio)
+                seen.add(k); names.append(fio)
     return leaders, founders, names
-
-# --- дальше всё как было, не трогаем ---
-def _clean_person(s: str) -> str:
-    """Убирает хвосты в скобках и лишние пробелы: 'Иванов (ИНН..., доля...)' → 'Иванов'."""
-    s = (s or "").strip()
-    s = re.sub(r"\s*\(.*?\)\s*$", "", s)
-    s = re.sub(r"\s{2,}", " ", s)
-    return s
-
-def _extract_urls(text: str) -> List[str]:
-    """Извлекает уникальные URL в порядке появления."""
-    return list(dict.fromkeys(_URL_RE.findall(text or "")))
-
-def _dedup_urls_in_paragraph(paragraph: str) -> str:
-    """
-    Режем по «;», оставляем первую запись с каждым уникальным URL.
-    Возвращаем склеенный абзац тем же разделителем.
-    """
-    seen, out = set(), []
-    for part in re.split(r"\s*;\s*", (paragraph or "").strip()):
-        if not part:
-            continue
-        u = next(iter(_extract_urls(part)), None)
-        if (not u) or (u not in seen):
-            out.append(part.strip())
-            if u:
-                seen.add(u)
-    return "; ".join(out)
-
-
-# NEW — мягкая санитизация интервью: вырезаем только ИНН/ОГРН, фин.термины не трогаем
-_FORBID_ID_RE = re.compile(r"\b(ИНН|ОГРН)\b", re.I)
-
-def sanitize_interviews(text: str) -> str:
-    parts = []
-    for part in re.split(r"\s*;\s*", (text or "").strip()):
-        if part and not _FORBID_ID_RE.search(part):
-            parts.append(part.strip())
-    return "; ".join(parts)
-
-
 
 def _names_from_checko(company_info: Optional[Dict]) -> List[str]:
     """
-    Достаёт ФИО из dict {'leaders_raw': [...], 'founders_raw': [...]},
-    чистит хвосты '(ИНН..., доля ...)', делает дедуп по нижнему регистру.
+    Лёгкий режим: достаём строки из leaders_raw/founders_raw и чистим «(ИНН…, доля …)».
+    Используется как бэкап.
     """
-    if not isinstance(company_info, dict):   # ← тоже поправили на dict
+    if not isinstance(company_info, dict):
         return []
     raw: List[str] = []
     for k in ("leaders_raw", "founders_raw"):
@@ -1540,35 +1530,47 @@ def _names_from_checko(company_info: Optional[Dict]) -> List[str]:
     for fio in raw:
         key = fio.lower()
         if fio and key not in seen:
-            seen.add(key)
-            out.append(fio)
+            seen.add(key); out.append(fio)
     return out
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Промпты/парсинг для дискавери персон и интервью
+# ─────────────────────────────────────────────────────────────────────────────
 def _build_people_discovery_prompt(company: str,
                                    site_hint: Optional[str],
                                    market: Optional[str]) -> str:
-    site_line = f"Официальный сайт (если верно): {site_hint}. " if site_hint else ""
+    dom = _domain_from_site(site_hint)
     mkt = f"(рынок: {market}). " if market else ""
+    site_line = f"Официальный сайт (если верно): {site_hint}. " if site_hint else ""
+    pref = f"— Предпочтительно источники: официальный сайт{(' ('+dom+')' if dom else '')}, СМИ, профильные медиа, видео/подкасты, соцсети компании."
     return f"""
 Найди действующих руководителей и/или основателей компании «{company}». {mkt}{site_line}
 Охват 5 лет. Только подтверждённые факты с ПРЯМЫМИ URL.
 
 Формат вывода — только строки:
-PERSON: <ФИО> — <должность/роль> — <прямой URL>
+PERSON: <ФИО> — <должность/роль> — <прямой URL на источник>
+
+Требования:
+— Не указывать ИНН/ОГРН, доли, структуру владения и финпоказатели.
+{pref}
+— Если данных нет — выведи «PERSON: нет данных».
 """.strip()
 
+# Терпимый к разным тире/дефисам парсер
+_PERSON_LINE_RE = re.compile(r"\s*PERSON:\s*(.+?)\s+[—–-]\s+.+?\s+[—–-]\s+https?://", re.I)
+
 def _parse_people_lines(text: str) -> List[str]:
-    """Парсит строки вида 'PERSON: Иван Иванов — гендиректор — https://...'; возвращает список ФИО."""
     if not text:
         return []
     ppl: List[str] = []
     for ln in text.splitlines():
-        m = re.match(r"\s*PERSON:\s*(.+?)\s+—\s+.+?\s+—\s+https?://", ln.strip(), re.I)
+        if "нет данных" in ln.lower():
+            continue
+        m = _PERSON_LINE_RE.match(ln.strip())
         if m:
             fio = _clean_person(m.group(1))
             if fio:
                 ppl.append(fio)
-    # дедуп с сохранением порядка
     return list(dict.fromkeys(ppl))
 
 def _build_interviews_prompt(company: str,
@@ -1588,11 +1590,23 @@ def _build_interviews_prompt(company: str,
 В конце абзаца через пробел добавь: «Источники: <URL1>, <URL2>, ...» (уникальные).
 """.strip()
 
+# Мягкая санитизация интервью: вырезаем только ИНН/ОГРН (таблица при этом уже построена выше)
+_FORBID_ID_RE = re.compile(r"\b(ИНН|ОГРН)\b", re.I)
+def sanitize_interviews(text: str) -> str:
+    parts = []
+    for part in re.split(r"\s*;\s*", (text or "").strip()):
+        if part and not _FORBID_ID_RE.search(part):
+            parts.append(part.strip())
+    return "; ".join(parts)
+
 def _interviews_by_names(company: str,
                          names: List[str],
                          site_hint: Optional[str],
                          market: Optional[str]) -> str:
-    """Ищет интервью по заданным ФИО и возвращает один абзац: dedup → мягкая санитизация."""
+    """
+    Ищем интервью по заданным ФИО и возвращаем один абзац:
+      LLM → de-dup по URL → мягкая санитизация (без фин.фильтров).
+    """
     if not names:
         return "нет данных"
     prompt = _build_interviews_prompt(company, names, site_hint, market)
@@ -1600,17 +1614,15 @@ def _interviews_by_names(company: str,
         raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=1400)
     except Exception as e:
         return f"нет данных (ошибка: {e})"
-    # 1) сначала оставляем по одному на каждый уникальный URL
-    para = _dedup_urls_in_paragraph(raw)
-    # 2) затем срезаем только упоминания ИНН/ОГРН (финансовые слова не трогаем)
-    para = sanitize_interviews(para)
+    para = _dedup_urls_in_paragraph(raw)   # 1) дубликаты
+    para = sanitize_interviews(para)       # 2) убираем ИНН/ОГРН
     return para or "нет данных"
 
 def _discover_people(company: str,
                      site_hint: Optional[str],
                      market: Optional[str],
-                     top_n: int = 6) -> List[str]:
-    """Дискавери ФИО через Sonar (без Checko)."""
+                     top_n: int = 10) -> List[str]:
+    """Дискавери ФИО через Sonar (устойчивый промпт, терпимый парсер)."""
     prompt = _build_people_discovery_prompt(company, site_hint, market)
     try:
         raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=900)
@@ -1619,25 +1631,39 @@ def _discover_people(company: str,
     names = _parse_people_lines(raw)
     return names[:top_n]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Главная функция блока
+# ─────────────────────────────────────────────────────────────────────────────
 def build_dual_interviews(
     company: str,
     company_info: Optional[Dict] = None,
     site_hint: Optional[str] = None,
     market: Optional[str] = None,
-    max_people_inet: int = 8
+    max_people_inet: int = 10
 ) -> Dict[str, object]:
     """
-    Дополнено:
-      - ceo: dict | None
-      - shareholders: List[dict]
-      - md_block: str — ГОТОВЫЙ markdown для рендера (гендир, акционеры, интервью)
+    Возвращает структуру:
+      {
+        "names_checko": List[str],
+        "digest_checko": str,
+        "names_inet": List[str],
+        "digest_inet": str,
+        "names_union": List[str],
+        "digest_union": str,
+        "ceo": Dict|None,
+        "shareholders": List[Dict],
+        "md_block": str,  # ГОТОВЫЙ markdown (гендир, акционеры, интервью x3)
+      }
+
+    Важно:
+      — ИНН/доли используются в таблице и ЛИШЬ ПОТОМ чистим интервью.
+      — sanitize_invest на md_block НЕ применяем.
     """
-    # 1) Имена/структуры по Checko
+    # 1) Checko → leaders/founders/names
     leaders, founders, names_checko = _names_from_checko_rich(company_info)
 
     # CEO + акционеры
     ceo = _pick_ceo(leaders, names_fallback=names_checko)
-
     shareholders = _shareholders_from_founders(founders)
 
     # 2) Интервью по Checko-именам
@@ -1647,7 +1673,11 @@ def build_dual_interviews(
     names_inet = _discover_people(company, site_hint, market, top_n=max_people_inet)
     digest_inet = _interviews_by_names(company, names_inet, site_hint, market) if names_inet else "нет данных"
 
-    # 4) Markdown блок
+    # 3.5) Объединённый проход (даёт больше хитов)
+    names_union = list(dict.fromkeys((names_checko or []) + (names_inet or [])))[:12]
+    digest_union = _interviews_by_names(company, names_union, site_hint, market) if names_union else "нет данных"
+
+    # 4) Markdown-блок (без общей санитизации, чтобы не убить таблицу)
     ceo_line = "_нет данных_"
     if ceo:
         inn_txt = f"(ИНН {ceo['inn']})" if ceo.get("inn") else ""
@@ -1662,10 +1692,13 @@ def build_dual_interviews(
         sh_tbl,
         "",
         "**Интервью (по данным Checko):**",
-        digest_checko or "_нет данных_",
+        (digest_checko or "_нет данных_").strip(),
         "",
         "**Интервью (интернет-дискавери):**",
-        digest_inet or "_нет данных_",
+        (digest_inet or "_нет данных_").strip(),
+        "",
+        "**Интервью (объединённый поиск):**",
+        (digest_union or "_нет данных_").strip(),
     ]
     md_block = "\n".join(md_parts).strip()
 
@@ -1674,14 +1707,15 @@ def build_dual_interviews(
         "digest_checko": digest_checko,
         "names_inet": names_inet,
         "digest_inet": digest_inet,
+        "names_union": names_union,
+        "digest_union": digest_union,
         "ceo": ceo,
         "shareholders": shareholders,
         "md_block": md_block,
     }
 
-# Backward-compat
+# Backward-compat alias
 build_dual_interviews_from_v2 = build_dual_interviews
-
 
 
 
