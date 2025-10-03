@@ -653,8 +653,8 @@ def invest_snapshot_enriched(
         parts.append(digest_inet)
 
     # фильтруем финпоказатели/ИНН/ОГРН на всякий
-    new_block = sanitize_invest("\n".join(parts).strip())
-
+    new_block = "\n".join(parts).strip()
+    
     # 4) подменяем/вставляем секцию «Интервью»
     return _replace_interviews_section(base_md, new_block)
 
@@ -1509,6 +1509,19 @@ def _dedup_urls_in_paragraph(paragraph: str) -> str:
                 seen.add(u)
     return "; ".join(out)
 
+
+# NEW — мягкая санитизация интервью: вырезаем только ИНН/ОГРН, фин.термины не трогаем
+_FORBID_ID_RE = re.compile(r"\b(ИНН|ОГРН)\b", re.I)
+
+def sanitize_interviews(text: str) -> str:
+    parts = []
+    for part in re.split(r"\s*;\s*", (text or "").strip()):
+        if part and not _FORBID_ID_RE.search(part):
+            parts.append(part.strip())
+    return "; ".join(parts)
+
+
+
 def _names_from_checko(company_info: Optional[Dict]) -> List[str]:
     """
     Достаёт ФИО из dict {'leaders_raw': [...], 'founders_raw': [...]},
@@ -1579,7 +1592,7 @@ def _interviews_by_names(company: str,
                          names: List[str],
                          site_hint: Optional[str],
                          market: Optional[str]) -> str:
-    """Ищет интервью по заданным ФИО и возвращает один очищенный абзац или 'нет данных'."""
+    """Ищет интервью по заданным ФИО и возвращает один абзац: dedup → мягкая санитизация."""
     if not names:
         return "нет данных"
     prompt = _build_interviews_prompt(company, names, site_hint, market)
@@ -1587,8 +1600,10 @@ def _interviews_by_names(company: str,
         raw = _pplx_call_invest(prompt, model="sonar", recency=None, max_tokens=1400)
     except Exception as e:
         return f"нет данных (ошибка: {e})"
-    para = sanitize_invest(raw)
-    para = _dedup_urls_in_paragraph(para)
+    # 1) сначала оставляем по одному на каждый уникальный URL
+    para = _dedup_urls_in_paragraph(raw)
+    # 2) затем срезаем только упоминания ИНН/ОГРН (финансовые слова не трогаем)
+    para = sanitize_interviews(para)
     return para or "нет данных"
 
 def _discover_people(company: str,
