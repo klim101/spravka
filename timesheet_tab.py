@@ -299,84 +299,101 @@ def _hydrate_week_state(ctx: str, user_id: int, week: TimesheetWeek, projects: p
     st.session_state[sig_key] = signature
 
 def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
-    key = f"ts_rows_{ctx}_{day.isoformat()}"
-    rows = st.session_state.setdefault(key, [{"project": None, "hours": None}])
+    day_key = f"ts_rows_{ctx}_{day.isoformat()}"
+    rows = st.session_state.setdefault(day_key, [{"project": None, "hours": None}])
 
     proj_opts = [PROJECT_PLACEHOLDER] + project_names
     hrs_opts  = [HOURS_PLACEHOLDER] + HOUR_CHOICES
 
     def _idx(options, val):
-        if val is None: return 0
-        try: return options.index(val)
-        except Exception: return 0
+        if val is None:
+            return 0
+        try:
+            return options.index(val)
+        except Exception:
+            return 0
 
     st.markdown('<div class="day-card">', unsafe_allow_html=True)
     st.markdown(f'<div class="day-title">{day.strftime("%A, %d.%m.%Y")}</div>', unsafe_allow_html=True)
 
-    to_delete = []
     for i, row in enumerate(rows):
-        pref = f"{key}_{i}"
+        pref  = f"{day_key}_{i}"
+        key_p = f"{pref}_p"
+        key_h = f"{pref}_h"
+
         c1, c2, c3 = st.columns([3, 1, 0.6])
+
         with c1:
-            proj_val = st.selectbox(
+            st.selectbox(
                 "Проект",
                 proj_opts,
-                index=_idx(proj_opts, row["project"]),
-                key=f"{pref}_p",
+                index=_idx(proj_opts, row.get("project")),
+                key=key_p,
                 label_visibility="collapsed",
-                on_change=_mark_dirty, args=(ctx,),
+                on_change=_on_row_change,
+                args=(day_key, i, key_p, key_h, ctx),
             )
+
         with c2:
-            hrs_val = st.selectbox(
+            st.selectbox(
                 "Часы",
                 hrs_opts,
-                index=_idx(hrs_opts, row["hours"]),
-                key=f"{pref}_h",
+                index=_idx(hrs_opts, row.get("hours")),
+                key=key_h,
                 label_visibility="collapsed",
                 format_func=_fmt_hours,
-                on_change=_mark_dirty, args=(ctx,),
+                on_change=_on_row_change,
+                args=(day_key, i, key_p, key_h, ctx),
             )
+
         with c3:
-            can_rm = not (len(rows) == 1 and proj_val == PROJECT_PLACEHOLDER and hrs_val == HOURS_PLACEHOLDER)
-            if can_rm and st.button("✖", key=f"{pref}_rm"):
-                to_delete.append(i)
+            # Кнопка удаления как колбэк (без ручного rerun)
+            can_rm = not (len(rows) == 1 and row.get("project") is None and row.get("hours") is None)
+            st.button("✖", key=f"{pref}_rm", disabled=not can_rm,
+                      on_click=_on_remove_row, args=(day_key, i, ctx))
 
-        rows[i] = {
-            "project": None if proj_val == PROJECT_PLACEHOLDER else proj_val,
-            "hours":   None if hrs_val == HOURS_PLACEHOLDER else float(hrs_val),
-        }
-
-    # удаление → мгновенно перерисуемся
-    if to_delete:
-        for i in sorted(to_delete, reverse=True):
-            rows.pop(i)
-        if not rows:
-            rows.append({"project": None, "hours": None})
-        st.session_state[key] = rows
-        st.rerun()
-
-    # последняя строка стала заполненной → добавим новую и перерисуемся
-    if rows and rows[-1]["project"] is not None and rows[-1]["hours"] is not None:
-        rows.append({"project": None, "hours": None})
-        st.session_state[key] = rows
-        st.rerun()
-
-    day_total = sum(float(r["hours"]) for r in rows if r["project"] and r["hours"] is not None)
+    # считаем итог уже по актуальному состоянию из session_state
+    rows_now = st.session_state[day_key]
+    day_total = sum(float(r["hours"]) for r in rows_now
+                    if r.get("project") and r.get("hours") is not None)
     st.caption(f"Итого за день: {day_total:g} ч")
     st.markdown('</div>', unsafe_allow_html=True)
     return day_total
 
-def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: Dict[str, int]) -> List[Tuple[int, date, float]]:
-    out: List[Tuple[int, date, float]] = []
-    for d in week.dates:
-        rows = st.session_state.get(f"ts_rows_{ctx}_{d.isoformat()}", [])
-        for r in rows:
-            proj, hrs = r.get("project"), r.get("hours")
-            if proj and hrs and hrs > 0:
-                pid = name2pid.get(str(proj))
-                if pid:
-                    out.append((int(pid), d, float(hrs)))
-    return out
+
+def _on_row_change(day_key: str, idx: int, key_proj: str, key_hrs: str, ctx: str):
+    """Обновляет строку idx и при необходимости добавляет пустой хвост."""
+    rows = st.session_state.get(day_key, [{"project": None, "hours": None}])
+
+    proj_val = st.session_state.get(key_proj, PROJECT_PLACEHOLDER)
+    hrs_val  = st.session_state.get(key_hrs, HOURS_PLACEHOLDER)
+
+    proj = None if proj_val == PROJECT_PLACEHOLDER else proj_val
+    hrs  = None if hrs_val  == HOURS_PLACEHOLDER   else float(hrs_val)
+
+    # гарантируем наличие нужного индекса
+    while idx >= len(rows):
+        rows.append({"project": None, "hours": None})
+
+    rows[idx] = {"project": proj, "hours": hrs}
+
+    # если последняя строка теперь заполнена — добавим ещё одну пустую
+    if rows and rows[-1]["project"] is not None and rows[-1]["hours"] is not None:
+        rows.append({"project": None, "hours": None})
+
+    st.session_state[day_key] = rows
+    st.session_state[f"ts_dirty_{ctx}"] = True  # помечаем «изменено» для автосохранения
+
+
+def _on_remove_row(day_key: str, idx: int, ctx: str):
+    """Удаляет строку idx без st.rerun()."""
+    rows = st.session_state.get(day_key, [{"project": None, "hours": None}])
+    if 0 <= idx < len(rows):
+        rows.pop(idx)
+    if not rows:
+        rows.append({"project": None, "hours": None})
+    st.session_state[day_key] = rows
+    st.session_state[f"ts_dirty_{ctx}"] = True
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Заголовок/контролы и рендер вкладки
@@ -508,6 +525,7 @@ def render_timesheet_tab():
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
 
 
 
