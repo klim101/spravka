@@ -19,7 +19,29 @@ Streamlit-вкладка «Timesheet» для внесения часов в т�
     DEFAULT_TG_ID = 123456789  # если хотите предвыбирать пользователя по tg_id при первом заходе
 """
 from __future__ import annotations
+import streamlit as st
+import sys, subprocess
 
+def _ensure_deps():
+    try:
+        import sqlalchemy  # noqa
+        import pg8000      # noqa
+    except ModuleNotFoundError:
+        with st.spinner("Устанавливаю зависимости для Timesheet…"):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "SQLAlchemy==2.0.32", "pg8000==1.31.2"])
+
+def _sa():
+    _ensure_deps()
+    from sqlalchemy import create_engine, text, inspect
+    return create_engine, text, inspect
+
+def get_engine():
+    create_engine, _, _ = _sa()
+    dsn = st.secrets.get("POSTGRES_DSN", "")
+    if not dsn:
+        st.error("В Streamlit Secrets нет POSTGRES_DSN.")
+        st.stop()
+    return create_engine(dsn)
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -535,3 +557,4 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
