@@ -33,44 +33,26 @@ from sqlalchemy.engine import URL
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    # 1) Если есть готовый DSN в секретах/переменных — используем его БЕЗ вариантов
-    dsn = (
-        st.secrets.get("POSTGRES_DSN")
-        or st.secrets.get("SUPABASE_DB_URL")
-        or os.getenv("DATABASE_URL")
-    )
-    if dsn:
-        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
-        # Небольшая проверка и подсказка, каким драйвером реально подключились
-        try:
-            with eng.connect() as c:
-                c.exec_driver_sql("SELECT 1")
-            st.caption(f"DB OK · {eng.dialect.name}+{eng.dialect.driver}")
-        except Exception as e:
-            st.error(f"Не удалось подключиться по POSTGRES_DSN: {e}")
-            st.stop()
-        return eng
+    from sqlalchemy import create_engine
 
-    # 2) Запасной путь (если вдруг DSN не дали): собираем URL под pg8000 с SSL
-    host = st.secrets["SUPA_HOST"]
-    user = st.secrets.get("SUPA_USER", "postgres")
-    pwd  = st.secrets["SUPA_PASSWORD"]
-    db   = st.secrets.get("SUPA_DB", "postgres")
+    dsn = st.secrets.get("POSTGRES_DSN", "").strip()
+    if not dsn:
+        st.error("Нет строки подключения POSTGRES_DSN в Secrets.")
+        st.stop()
 
-    url = URL.create(
-        "postgresql+pg8000",
-        username=user,
-        password=pwd,
-        host=host,
-        port=5432,
-        database=db,
-        query={"ssl": "true"},
-    )
-    eng = create_engine(url, pool_pre_ping=True, pool_recycle=1800, future=True)
-    with eng.connect() as c:
-        c.exec_driver_sql("SELECT 1")
-    st.caption(f"DB OK · {eng.dialect.name}+{eng.dialect.driver}")
-    return eng
+    # Нормализация: если вдруг указали без драйвера
+    if dsn.startswith("postgresql://"):
+        dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+    # Страховка: случайно оставили ssl=true — заменим на корректный параметр
+    if "ssl=true" in dsn and "psycopg2" in dsn:
+        dsn = dsn.replace("ssl=true", "sslmode=require")
+
+    # Если sslmode не указан — добавим
+    if "sslmode=" not in dsn:
+        dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
+
+    return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
 
 
 
@@ -596,6 +578,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
