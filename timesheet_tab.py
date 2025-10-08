@@ -464,6 +464,49 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
     return uid, week
 
 
+def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[tuple[int, date, float]]:
+    """
+    Собирает все заполненные строки за неделю из session_state и
+    превращает в [(project_id, date, hours), ...].
+    Плейсхолдеры и пустые строки игнорируются.
+    """
+    tuples: list[tuple[int, date, float]] = []
+
+    for d in week.dates:
+        day_key = f"ts_rows_{ctx}_{d.isoformat()}"
+        rows = st.session_state.get(day_key, [])
+        if not isinstance(rows, list):
+            continue
+
+        for r in rows:
+            proj_name = r.get("project")
+            hrs_val   = r.get("hours")
+
+            if proj_name in (None, "", PROJECT_PLACEHOLDER):
+                continue
+            if hrs_val in (None, "", HOURS_PLACEHOLDER):
+                continue
+
+            pid = name2pid.get(str(proj_name))
+            if not pid:
+                # незнакомый проект — пропускаем
+                continue
+
+            try:
+                hours = float(hrs_val)
+            except Exception:
+                continue
+
+            if hours <= 0:
+                continue
+
+            tuples.append((int(pid), d, hours))
+
+    return tuples
+
+
+
+
 def render_timesheet_tab():
     """Вкладка Timesheet: теперь с автосохранением недели при любом изменении."""
     ensure_db_once()
@@ -525,6 +568,7 @@ def render_timesheet_tab():
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
 
 
 
