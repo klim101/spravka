@@ -113,8 +113,8 @@ overrides==7.7.0
 packaging==25.0
 streamlit==1.46.0
 pandas==2.3.3
-SQLAlchemy==2.0.43
-pg8000>=1.31.2
+psycopg2-binary>=2.9
+SQLAlchemy==2.0
 pandocfilters==1.5.1
 parso==0.8.4
 pdfrw==0.4
