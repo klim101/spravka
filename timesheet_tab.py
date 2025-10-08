@@ -438,8 +438,7 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
             if st.button("✅ Выбрать этого пользователя"):
                 _save_uid(int(selected_id))
                 st.session_state["ts_choose_user"] = False
-                st.rerun()
-            uid = None
+                        uid = None
 
     return uid, week
 
@@ -451,11 +450,11 @@ def render_timesheet_tab():
     users = fetch_users()
     if projects.empty or users.empty:
         st.info("Добавьте хотя бы одного пользователя и проект.")
-        st.stop()
+        return
 
     user_id, week = _header_controls(users)
     if not user_id:
-        st.stop()
+        return
 
     # контекст на пару (user, week)
     ctx = f"u{user_id}_{week.monday.isoformat()}"
@@ -504,5 +503,6 @@ def render_timesheet_tab():
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
 
 
