@@ -19,29 +19,55 @@ Streamlit-вкладка «Timesheet» для внесения часов в т�
     DEFAULT_TG_ID = 123456789  # если хотите предвыбирать пользователя по tg_id при первом заходе
 """
 from __future__ import annotations
+
+
+
 import streamlit as st
-import sys, subprocess
-
-def _ensure_deps():
-    try:
-        import sqlalchemy  # noqa
-        import pg8000      # noqa
-    except ModuleNotFoundError:
-        with st.spinner("Устанавливаю зависимости для Timesheet…"):
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "SQLAlchemy==2.0.32", "pg8000==1.31.2"])
-
-def _sa():
-    _ensure_deps()
-    from sqlalchemy import create_engine, text, inspect
-    return create_engine, text, inspect
+from sqlalchemy.engine import URL
 
 def get_engine():
+    # ленивые импорты после _ensure_deps()
     create_engine, _, _ = _sa()
-    dsn = st.secrets.get("POSTGRES_DSN", "")
-    if not dsn:
-        st.error("В Streamlit Secrets нет POSTGRES_DSN.")
+
+    # 1) читаем части из секретов
+    host = st.secrets.get("SUPA_HOST")
+    db   = st.secrets.get("SUPA_DB", "postgres")
+    user = st.secrets.get("SUPA_USER", "postgres")
+    pwd  = st.secrets.get("SUPA_PASSWORD")
+
+    missing = [k for k,v in {"SUPA_HOST":host,"SUPA_PASSWORD":pwd}.items() if not v]
+    if missing:
+        st.error(f"В Secrets нет: {', '.join(missing)}. Зайди в Settings → Secrets и добавь.")
         st.stop()
-    return create_engine(dsn)
+
+    # 2) собираем безопасный URL (пароль будет корректно экранирован)
+    url = URL.create(
+        drivername="postgresql+psycopg2",
+        username=user,
+        password=pwd,
+        host=host,
+        port=5432,
+        database=db,
+        query={"sslmode": "require"},   # Supabase требует SSL
+    )
+
+    eng = create_engine(url, pool_pre_ping=True, pool_recycle=1800)
+
+    # 3) быстрая проверка соединения (даст понятную ошибку)
+    try:
+        with eng.connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
+    except Exception as e:
+        st.error("Не могу подключиться к Supabase. Проверь хост/пароль/SSL.")
+        st.write("DSN (без пароля):", url.render_as_string(hide_password=True))
+        st.exception(e)   # покажет первопричину
+        st.stop()
+
+    return eng
+
+
+
+
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -557,4 +583,5 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
