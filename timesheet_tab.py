@@ -22,65 +22,14 @@ from __future__ import annotations
 
 
 
+
 import streamlit as st
-from sqlalchemy.engine import URL
-
-
-import socket
-import psycopg2
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL
+from sqlalchemy import create_engine
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    import socket
-    import psycopg2
-    from sqlalchemy import create_engine
-
-    # 1) Если задан POSTGRES_DSN — используем его как «истину».
-    # РЕКОМЕНДУЕМАЯ форма для Supabase через pg8000:
-    # postgresql+pg8000://postgres:KlimklutnwA1%21@db.hvntnpffdnywlxhlrxcm.supabase.co:5432/postgres?ssl=true
-    dsn = st.secrets.get("POSTGRES_DSN", "").strip()
-    if dsn:
-        return create_engine(
-            dsn,
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            future=True,
-        )
-
-    # 2) Иначе — собираем соединение из SUPA_* и форсируем IPv4 для psycopg2
-    host = st.secrets["SUPA_HOST"]            # db.hvntnpffdnywlxhlrxcm.supabase.co
-    port = 5432
-    db   = st.secrets.get("SUPA_DB", "postgres")
-    user = st.secrets.get("SUPA_USER", "postgres")
-    pwd  = st.secrets["SUPA_PASSWORD"]
-
-    # Берём A-запись (IPv4)
-    ipv4 = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
-
-    def _creator():
-        # host оставляем FQDN для TLS/SNI, а hostaddr — реальный IPv4
-        return psycopg2.connect(
-            host=host,
-            hostaddr=ipv4,
-            port=port,
-            dbname=db,
-            user=user,
-            password=pwd,
-            sslmode="require",
-            application_name="spravka-timesheet",
-            connect_timeout=10,
-        )
-
-    # URL пустой — драйвер берётся из creator()
-    return create_engine(
-        "postgresql+psycopg2://",
-        creator=_creator,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        future=True,
-    )
+    dsn = st.secrets["POSTGRES_DSN"]  # берём ровно то, что в секретах
+    return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
 
 
 
@@ -606,6 +555,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
