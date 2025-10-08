@@ -111,10 +111,10 @@ openai==0.27.7
 openpyxl==3.1.5
 overrides==7.7.0
 packaging==25.0
-pandas>=2.2.2
-streamlit>=1.37.0
-sqlalchemy>=2.0.32
-psycopg2-binary>=2.9.9
+streamlit==1.46.0
+pandas==2.3.3
+SQLAlchemy==2.0.43
+psycopg2-binary==2.9.10
 pandocfilters==1.5.1
 parso==0.8.4
 pdfrw==0.4
