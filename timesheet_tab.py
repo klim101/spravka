@@ -80,8 +80,6 @@ from sqlalchemy import create_engine, text, inspect
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _dsn_from_secrets() -> str:
-    import os
-    import urllib.parse as up
     dsn = (
         st.secrets.get("POSTGRES_DSN")
         or st.secrets.get("SUPABASE_DB_URL")
@@ -93,17 +91,24 @@ def _dsn_from_secrets() -> str:
         user = st.secrets.get("SUPA_USER")
         pwd  = st.secrets.get("SUPA_PASSWORD")
         if all([host, db, user, pwd]):
-            pwd_q = up.quote_plus(str(pwd))
-            dsn = f"postgresql+psycopg2://{user}:{pwd_q}@{host}:5432/{db}?sslmode=require"
-    if not dsn:
-        raise RuntimeError(
-            "Не найден DSN к PostgreSQL Supabase. "
-            "Добавьте POSTGRES_DSN (или SUPABASE_DB_URL), "
-            "или SUPA_HOST/SUPA_DB/SUPA_USER/SUPA_PASSWORD."
-        )
-    if dsn.startswith("postgresql://") and "+psycopg2" not in dsn:
+            from urllib.parse import quote_plus
+            pwd_q = quote_plus(pwd)  # на случай спецсимволов
+            dsn = f"postgresql+psycopg2://{user}:{pwd_q}@{host}:5432/{db}"
+        else:
+            raise RuntimeError(
+                "Не найден DSN к PostgreSQL Supabase. "
+                "Добавьте POSTGRES_DSN (или SUPABASE_DB_URL) в st.secrets "
+                "или SUPA_HOST/SUPA_DB/SUPA_USER/SUPA_PASSWORD."
+            )
+
+    # Нормализуем префикс для SQLAlchemy+psycopg2
+    if dsn.startswith("postgres://"):
+        dsn = dsn.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif dsn.startswith("postgresql://") and "+psycopg2" not in dsn:
         dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
+
     return dsn
+
 
 
 @st.cache_resource(show_spinner=False)
@@ -587,6 +592,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
