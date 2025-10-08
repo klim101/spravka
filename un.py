@@ -33,8 +33,8 @@ import threading
 import time
 import functools
 import ast
-from timesheet_tab import render_timesheet_tab, ensure_db
-ensure_db()  # безопасно дергать при старте (создаст недостающее)
+from timesheet_tab import render_timesheet_tab
+#ensure_db()  # безопасно дергать при старте (создаст недостающее)
 
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
