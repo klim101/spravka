@@ -28,12 +28,13 @@ from sqlalchemy import create_engine
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    dsn = st.secrets.get("POSTGRES_DSN")
+    dsn = st.secrets.get("POSTGRES_DSN", "")
     if not dsn:
-        st.error("В secrets нет POSTGRES_DSN. Положи pooler-строку с драйвером +pg8000.")
+        st.error("В secrets нет POSTGRES_DSN. Положи строку для Supabase Pooler (psycopg2).")
         st.stop()
-
-    # Для pg8000 ssl можно передать в DSN (?ssl=true), поэтому connect_args не нужны.
+    # на всякий случай нормализуем схему postgres:// -> postgresql://
+    if dsn.startswith("postgres://"):
+        dsn = "postgresql://" + dsn[len("postgres://"):]
     return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
 
 
@@ -555,6 +556,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
