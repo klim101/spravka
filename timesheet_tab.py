@@ -391,6 +391,9 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
         picked = st.date_input("Неделя", value=date.today(), format="DD.MM.YYYY")
         week = TimesheetWeek.from_any(picked)
 
+    # по умолчанию ничего не выбрано
+    uid: Optional[int] = None
+
     saved_uid = _get_saved_uid()
     valid_ids = set(users["id"].astype(int).tolist())
 
@@ -408,12 +411,13 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
                     st.rerun()
             with c12:
                 if st.button("🔄 Обновить из БД"):
-                    # сбросим «сигнатуру» гидратации, чтобы перечитать
+                    # сбрасываем «сигнатуры» гидратации, чтобы перечитать
                     for k in list(st.session_state.keys()):
                         if "_hydrated_sig" in k:
                             del st.session_state[k]
                     st.rerun()
             uid = int(saved_uid)
+
         else:
             ids = users["id"].astype(int).tolist()
             labels = {int(r.id): f"{r.first_name}  ·  id={int(r.id)}" for r in users.itertuples(index=False)}
@@ -438,9 +442,10 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
             if st.button("✅ Выбрать этого пользователя"):
                 _save_uid(int(selected_id))
                 st.session_state["ts_choose_user"] = False
-                        uid = None
+                st.rerun()  # сразу перерисуемся в режим «пользователь выбран»
 
     return uid, week
+
 
 def render_timesheet_tab():
     """Вкладка Timesheet: теперь с автосохранением недели при любом изменении."""
@@ -503,6 +508,7 @@ def render_timesheet_tab():
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
 
 
 
