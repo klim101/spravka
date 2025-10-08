@@ -32,42 +32,31 @@ from sqlalchemy import create_engine
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    import socket
-    import psycopg2
     from sqlalchemy import create_engine
+    from urllib.parse import quote_plus
 
-    # Берём доступы из Streamlit Secrets
-    host = st.secrets["SUPA_HOST"]            # напр. "db.hvntnpffdnywlxhlrxcm.supabase.co"
-    port = 5432
+    # 1) Если задан POSTGRES_DSN — нормализуем его под pg8000+SSL
+    dsn = (st.secrets.get("POSTGRES_DSN") or "").strip()
+    if dsn:
+        if dsn.startswith("postgresql://"):
+            dsn = dsn.replace("postgresql://", "postgresql+pg8000://", 1)
+        dsn = dsn.replace("+psycopg2", "+pg8000")
+        if ("ssl=" not in dsn) and ("sslmode=" not in dsn):
+            dsn += ("&" if "?" in dsn else "?") + "ssl=true"
+        return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800)
+
+    # 2) Иначе собираем DSN из SUPA_* секретов
+    host = st.secrets["SUPA_HOST"]                      # db.hvntnpffdnywlxhlrxcm.supabase.co
     db   = st.secrets.get("SUPA_DB", "postgres")
     user = st.secrets.get("SUPA_USER", "postgres")
     pwd  = st.secrets["SUPA_PASSWORD"]
 
-    # Форсим IPv4: берём A-запись
-    ipv4 = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
-
-    # Создаём низкоуровневое соединение сами, чтобы задать hostaddr
-    def _creator():
-        return psycopg2.connect(
-            host=host,         # FQDN нужен для TLS/SNI
-            hostaddr=ipv4,     # форсим IPv4
-            port=port,
-            dbname=db,
-            user=user,
-            password=pwd,
-            sslmode="require", # шифрование обязательно
-            connect_timeout=10,
-        )
-
-    # Передаём creator() в SQLAlchemy. URL-строка здесь пустая — драйвер берётся из creator().
-    eng = create_engine(
-        "postgresql+psycopg2://",
-        creator=_creator,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        future=True,
+    # пароль обязательно URL-экранируем на случай @,#,%
+    dsn = (
+        f"postgresql+pg8000://{user}:{quote_plus(pwd)}@{host}:5432/{db}"
+        f"?ssl=true"
     )
-    return eng
+    return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800)
 
 
 
@@ -593,6 +582,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
