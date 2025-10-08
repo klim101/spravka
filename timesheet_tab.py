@@ -32,28 +32,34 @@ from sqlalchemy import create_engine
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    host = st.secrets["SUPA_HOST"]           # db.hvntnpffdnywlxhlrxcm.supabase.co
+    import socket
+    import psycopg2
+    from sqlalchemy import create_engine
+
+    # Берём доступы из Streamlit Secrets
+    host = st.secrets["SUPA_HOST"]            # напр. "db.hvntnpffdnywlxhlrxcm.supabase.co"
     port = 5432
     db   = st.secrets.get("SUPA_DB", "postgres")
     user = st.secrets.get("SUPA_USER", "postgres")
     pwd  = st.secrets["SUPA_PASSWORD"]
 
-    # Форсим IPv4: достаём A-запись (AF_INET), берём IP и передаём как hostaddr,
-    # при этом оставляем host=FQDN для корректного TLS.
+    # Форсим IPv4: берём A-запись
     ipv4 = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
 
+    # Создаём низкоуровневое соединение сами, чтобы задать hostaddr
     def _creator():
         return psycopg2.connect(
-            host=host,
-            hostaddr=ipv4,     # ключевая строка — форсим IPv4
+            host=host,         # FQDN нужен для TLS/SNI
+            hostaddr=ipv4,     # форсим IPv4
             port=port,
             dbname=db,
             user=user,
             password=pwd,
-            sslmode="require",
+            sslmode="require", # шифрование обязательно
+            connect_timeout=10,
         )
 
-    # URL пустой (dialect+driver), коннектор даём через creator()
+    # Передаём creator() в SQLAlchemy. URL-строка здесь пустая — драйвер берётся из creator().
     eng = create_engine(
         "postgresql+psycopg2://",
         creator=_creator,
@@ -587,6 +593,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
