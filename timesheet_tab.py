@@ -145,39 +145,36 @@ def _next_ids(con, n: int) -> List[int]:
 
 def save_week_replace(user_id: int, week: TimesheetWeek, tuples: List[Tuple[int, date, float]]) -> int:
     """
-    tuples: [(project_id, work_date, hours), ...]
-    Алгоритм: DELETE (неделя, пользователь) -> INSERT текущих строк.
-    Возвращает, сколько записей вставлено.
+    tuples: [(project_id, work_date, hours)]
+    Алгоритм: DELETE (вся неделя) -> пакетная вставка executemany.
+    Возвращает количество вставленных строк.
     """
     eng = get_engine()
     with eng.begin() as con:
+        # 1) Сносим всё за неделю для данного пользователя
         con.execute(
             text("DELETE FROM log WHERE user_id=:uid AND work_date BETWEEN :d1 AND :d7"),
             {"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]},
         )
+
         if not tuples:
             return 0
-        ids  = _next_ids(con, len(tuples))
-        uids = [user_id] * len(tuples)
-        pids = [pid for (pid, _, _) in tuples]
-        dts  = [dt for (_, dt, _) in tuples]
-        hrs  = [hh for (_, _, hh) in tuples]
-        try:
-            con.execute(
-                text("""
-                  INSERT INTO log (id, user_id, project_id, work_date, hours)
-                  SELECT * FROM UNNEST(:ids::bigint[], :uids::bigint[], :pids::bigint[], :dts::date[], :hrs::float[])
-                """),
-                {"ids": ids, "uids": uids, "pids": pids, "dts": dts, "hrs": hrs},
-            )
-        except Exception:
-            # Фолбек на executemany, если UNNEST не поддерживается окружением
-            for i in range(len(tuples)):
-                con.execute(
-                    text("INSERT INTO log (id, user_id, project_id, work_date, hours) VALUES (:id, :uid, :pid, :dt, :hr)"),
-                    {"id": ids[i], "uid": uids[i], "pid": pids[i], "dt": dts[i], "hr": hrs[i]},
-                )
-        return len(tuples)
+
+        # 2) Генерим новые id и готовим payload
+        ids = _next_ids(con, len(tuples))
+        payload = [
+            {"id": ids[i], "uid": user_id, "pid": int(pid), "dt": dt, "hr": float(hr)}
+            for i, (pid, dt, hr) in enumerate(tuples)
+        ]
+
+        # 3) Пакетная вставка (executemany) — надёжно везде
+        stmt = text(
+            "INSERT INTO log (id, user_id, project_id, work_date, hours) "
+            "VALUES (:id, :uid, :pid, :dt, :hr)"
+        )
+        con.execute(stmt, payload)
+        return len(payload)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Query params helpers (универсально для новых/старых Streamlit)
@@ -434,6 +431,7 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
     return uid, week
 
 def render_timesheet_tab():
+    """Вкладка Timesheet: теперь с автосохранением недели при любом изменении."""
     ensure_db_once()
 
     projects = fetch_projects()
@@ -464,29 +462,51 @@ def render_timesheet_tab():
     for d in week.dates:
         totals.append(_render_day(ctx, d, proj_names))
 
+    # ---------- АВТОСОХРАНЕНИЕ (replace всей недели) ----------
+    # собираем текущее содержимое UI -> в нормализованный список троек (pid, date, hours)
+    name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
+    tuples = _collect_rows_by_day(ctx, week, name2pid)
+
+    # считаем хэш содержимого, чтобы не писать в БД на каждом ререндере
+    import hashlib, json
+    def _digest(rows):
+        norm = sorted([(int(pid), d.isoformat(), float(hr)) for (pid, d, hr) in rows])
+        return hashlib.md5(json.dumps(norm, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    cur_hash = _digest(tuples)
+    hash_key = f"ts_last_hash_{ctx}"
+
+    if st.session_state.get(hash_key) != cur_hash:
+        try:
+            n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
+            fetch_week_rows.clear()  # сброс кеша читаемой недели
+            st.session_state[hash_key] = cur_hash
+            st.toast(f"Автосохранено ({n} строк)")
+        except Exception as e:
+            # не меняем hash, чтобы попытка повторилась при следующем ререндере
+            st.warning(f"Не удалось автосохранить: {e}")
+
+    # ----------------------------------------------------------
+
     st.markdown("---")
     c1, c2 = st.columns([1, 4])
     with c1:
+        # ручная кнопка как дублёр (на случай отключения toasts/сетевых сбоев)
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
-            name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
-            tuples = _collect_rows_by_day(ctx, week, name2pid)
             try:
                 n = save_week_replace(user_id, week, tuples)
-                fetch_week_rows.clear()  # сброс кеша
-                # после сохранения заново гидрируем из БД, чтобы UI = факт
-                for k in list(st.session_state.keys()):
-                    if "_hydrated_sig" in k:
-                        del st.session_state[k]
+                fetch_week_rows.clear()
+                st.session_state[hash_key] = _digest(tuples)
                 st.success(f"Сохранено: {n} записей ✔")
-                st.rerun()
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
     with c2:
         st.markdown(
-            "<span class='small'>Неделя сохраняется целиком: старые строки удаляются, новые вставляются. "
-            "Это исключает дубли и гарантирует корректную замену проекта/часов.</span>",
+            "<span class='small'>Сохраняется вся неделя целиком (replace): старые записи удаляются, текущие — вставляются. "
+            "Это исключает дубли и корректно обновляет часы/проекты.</span>",
             unsafe_allow_html=True,
         )
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
