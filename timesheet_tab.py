@@ -236,6 +236,11 @@ _CSS = """
 </style>
 """
 
+def _mark_dirty(ctx: str):
+    st.session_state[f"ts_dirty_{ctx}"] = True
+
+
+
 def _fmt_hours(v):
     try:
         f = float(v)
@@ -314,14 +319,22 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
         c1, c2, c3 = st.columns([3, 1, 0.6])
         with c1:
             proj_val = st.selectbox(
-                "Проект", proj_opts, index=_idx(proj_opts, row["project"]),
-                key=f"{pref}_p", label_visibility="collapsed",
+                "Проект",
+                proj_opts,
+                index=_idx(proj_opts, row["project"]),
+                key=f"{pref}_p",
+                label_visibility="collapsed",
+                on_change=_mark_dirty, args=(ctx,),
             )
         with c2:
             hrs_val = st.selectbox(
-                "Часы", hrs_opts, index=_idx(hrs_opts, row["hours"]),
-                key=f"{pref}_h", label_visibility="collapsed",
+                "Часы",
+                hrs_opts,
+                index=_idx(hrs_opts, row["hours"]),
+                key=f"{pref}_h",
+                label_visibility="collapsed",
                 format_func=_fmt_hours,
+                on_change=_mark_dirty, args=(ctx,),
             )
         with c3:
             can_rm = not (len(rows) == 1 and proj_val == PROJECT_PLACEHOLDER and hrs_val == HOURS_PLACEHOLDER)
@@ -463,50 +476,33 @@ def render_timesheet_tab():
         totals.append(_render_day(ctx, d, proj_names))
 
     # ---------- АВТОСОХРАНЕНИЕ (replace всей недели) ----------
-    # собираем текущее содержимое UI -> в нормализованный список троек (pid, date, hours)
     name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
     tuples = _collect_rows_by_day(ctx, week, name2pid)
-
-    # считаем хэш содержимого, чтобы не писать в БД на каждом ререндере
+    
     import hashlib, json
     def _digest(rows):
         norm = sorted([(int(pid), d.isoformat(), float(hr)) for (pid, d, hr) in rows])
         return hashlib.md5(json.dumps(norm, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-
+    
     cur_hash = _digest(tuples)
-    hash_key = f"ts_last_hash_{ctx}"
-
-    if st.session_state.get(hash_key) != cur_hash:
+    hash_key  = f"ts_last_hash_{ctx}"
+    dirty_key = f"ts_dirty_{ctx}"
+    
+    need_save = st.session_state.get(dirty_key, False) or (st.session_state.get(hash_key) != cur_hash)
+    
+    if need_save:
         try:
             n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
-            fetch_week_rows.clear()  # сброс кеша читаемой недели
-            st.session_state[hash_key] = cur_hash
+            fetch_week_rows.clear()                       # сброс кеша читаемой недели
+            st.session_state[hash_key]  = cur_hash
+            st.session_state[dirty_key] = False
             st.toast(f"Автосохранено ({n} строк)")
         except Exception as e:
-            # не меняем hash, чтобы попытка повторилась при следующем ререндере
             st.warning(f"Не удалось автосохранить: {e}")
-
     # ----------------------------------------------------------
 
-    st.markdown("---")
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        # ручная кнопка как дублёр (на случай отключения toasts/сетевых сбоев)
-        if st.button("💾 Сохранить", type="primary", use_container_width=True):
-            try:
-                n = save_week_replace(user_id, week, tuples)
-                fetch_week_rows.clear()
-                st.session_state[hash_key] = _digest(tuples)
-                st.success(f"Сохранено: {n} записей ✔")
-            except Exception as e:
-                st.error(f"Ошибка сохранения: {e}")
-    with c2:
-        st.markdown(
-            "<span class='small'>Сохраняется вся неделя целиком (replace): старые записи удаляются, текущие — вставляются. "
-            "Это исключает дубли и корректно обновляет часы/проекты.</span>",
-            unsafe_allow_html=True,
-        )
 
     total_week = sum(totals)
     st.markdown(f"**Итого за неделю:** {total_week:g} ч")
+
 
