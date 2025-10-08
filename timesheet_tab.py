@@ -28,7 +28,12 @@ from sqlalchemy import create_engine
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    dsn = st.secrets["POSTGRES_DSN"]  # берём ровно то, что в секретах
+    dsn = st.secrets.get("POSTGRES_DSN")
+    if not dsn:
+        st.error("В secrets нет POSTGRES_DSN. Положи pooler-строку с драйвером +pg8000.")
+        st.stop()
+
+    # Для pg8000 ssl можно передать в DSN (?ssl=true), поэтому connect_args не нужны.
     return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
 
 
@@ -74,11 +79,6 @@ def _dsn_from_secrets() -> str:
 
 
 
-@st.cache_resource(show_spinner=False)
-def get_engine():
-    dsn = _dsn_from_secrets()
-    eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=1800)
-    return eng
 
 
 def _detect_user_table(engine) -> str:
@@ -555,6 +555,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
