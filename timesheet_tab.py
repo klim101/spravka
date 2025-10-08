@@ -364,22 +364,92 @@ def _as_payload(edited: pd.DataFrame, projects: pd.DataFrame, week: TimesheetWee
     return out
 
 
+
+
+def qp_get(name: str, default=None):
+    """Безопасно читаем query param (строка или None)."""
+    v = st.query_params.get(name, default)
+    # В новых версиях это строка; на случай списка нормализуем:
+    if isinstance(v, list):
+        return v[0] if v else default
+    return v
+
+def qp_update(**kwargs):
+    """Обновляем query params (все значения превращаем в строки)."""
+    st.query_params.update({k: ("" if v is None else str(v)) for k, v in kwargs.items()})
+
+def qp_delete(*names):
+    """Удаляем указанные query params, если есть."""
+    for n in names:
+        if n in st.query_params:
+            del st.query_params[n]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Query params helpers (совместимы с новыми/старыми версиями Streamlit)
+# ──────────────────────────────────────────────────────────────────────────────
+import streamlit as st
+from typing import Optional, Tuple, List
+
+def qp_get(name: str, default=None):
+    """Безопасно читаем query param (вернёт строку или default)."""
+    try:
+        v = st.query_params.get(name, default)  # новый API
+    except Exception:
+        # fallback на старый API
+        try:
+            vmap = st.experimental_get_query_params()
+            v = vmap.get(name, [default])[0]
+        except Exception:
+            v = default
+    if isinstance(v, list):  # на всякий случай нормализуем
+        return v[0] if v else default
+    return v
+
+def qp_update(**kwargs):
+    """Обновляем query params (значения приводим к строкам)."""
+    payload = {k: ("" if v is None else str(v)) for k, v in kwargs.items()}
+    try:
+        st.query_params.update(payload)  # новый API
+    except Exception:
+        # fallback: полностью переустановим параметры
+        try:
+            current = st.experimental_get_query_params()
+        except Exception:
+            current = {}
+        current.update({k: [v] for k, v in payload.items()})
+        st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv)
+                                            for k, vv in current.items()})
+
+def qp_delete(*names):
+    """Удаляем указанные query params."""
+    try:
+        for n in names:
+            if n in st.query_params:
+                del st.query_params[n]
+    except Exception:
+        # fallback: соберём текущие и переустановим без лишних ключей
+        try:
+            current = st.experimental_get_query_params()
+        except Exception:
+            current = {}
+        for n in names:
+            current.pop(n, None)
+        st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv)
+                                            for k, vv in current.items()})
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Persisting chosen user (select once)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _get_saved_uid() -> Optional[int]:
-    # 1) query params
-    try:
-        qp = st.experimental_get_query_params()  # совместимость с разными версиями Streamlit
-        uid = qp.get("uid", [None])[0]
-    except Exception:
-        uid = None
-    if uid:
+    # 1) query params (приоритетнее: можно делиться ссылкой с ?uid=)
+    uid = qp_get("uid")
+    if uid not in (None, "", "None"):
         try:
             return int(uid)
         except Exception:
-            return None
+            pass
+
     # 2) session_state
     if "uid" in st.session_state:
         try:
@@ -388,22 +458,14 @@ def _get_saved_uid() -> Optional[int]:
             pass
     return None
 
-
 def _save_uid(uid: int) -> None:
     st.session_state["uid"] = int(uid)
-    try:
-        st.experimental_set_query_params(uid=str(uid))
-    except Exception:
-        pass
-
+    # кладём в URL, чтобы при рефреше не спрашивать снова
+    qp_update(uid=uid)
 
 def _clear_saved_uid() -> None:
     st.session_state.pop("uid", None)
-    try:
-        st.experimental_set_query_params()  # очистит параметры
-    except Exception:
-        pass
-
+    qp_delete("uid")
 
 def _header_controls(users: pd.DataFrame, projects: pd.DataFrame) -> Tuple[int, TimesheetWeek, List[str]]:
     st.markdown(_CSS, unsafe_allow_html=True)
@@ -427,11 +489,11 @@ def _header_controls(users: pd.DataFrame, projects: pd.DataFrame) -> Tuple[int, 
             st.markdown(f"**Пользователь:** {row['first_name']}  ·  id={int(row['id'])}")
             if st.button("Сменить пользователя"):
                 _clear_saved_uid()
-                st.experimental_rerun()
+                # на новых версиях достаточно qp_delete('uid'); на старых fallback выше всё сделает
+                st.rerun()
             user_id = int(saved_uid)
         else:
             # Первый заход: показываем выбор один раз
-            # Предвыбор по DEFAULT_TG_ID (если есть)
             default_idx = 0
             default_tg = st.secrets.get("DEFAULT_TG_ID")
             if default_tg:
@@ -556,6 +618,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
