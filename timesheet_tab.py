@@ -1,20 +1,7 @@
-# timesheet_tab.py
 # -*- coding: utf-8 -*-
-"""
-Streamlit-вкладка «Timesheet» (nikatime-style).
-Для каждого дня недели: строки из выпадающих списков [Проект] + [Часы].
-Сохранение в таблицу log (Supabase Postgres).
-
-Требуемые секреты (Streamlit → Secrets):
-  POSTGRES_DSN = "<SQLAlchemy DSN к Supabase>"
-  # пример для pooler (pg8000 + SSL):
-  # postgresql+pg8000://postgres.hvntnpffdnywlxhlrxcm:<URL-ENC-PASS>@aws-1-eu-north-1.pooler.supabase.com:6543/postgres?ssl=true
-
-Опционально:
-  DEFAULT_TG_ID = 123456789  # предвыбор пользователя по tg_id при первом заходе
-"""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -24,40 +11,39 @@ import streamlit as st
 from sqlalchemy import create_engine, inspect, text
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Подключение к БД
+# Подключение к Supabase (PostgreSQL)
 # ──────────────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    dsn = st.secrets.get("POSTGRES_DSN", "").strip()
+    dsn = st.secrets.get("POSTGRES_DSN", "")
     if not dsn:
         st.error(
-            "В secrets нет POSTGRES_DSN. Укажите SQLAlchemy строку подключения "
-            "(лучше к Transaction/Session pooler)."
+            "В secrets нет POSTGRES_DSN. Укажи строку для Supabase Pooler "
+            "(например, postgresql+psycopg2://postgres.<proj>:***@aws-1-...pooler.supabase.com:5432/postgres?sslmode=require)"
         )
         st.stop()
-    # нормализуем postgres:// → postgresql:// (если вдруг)
+    # нормализуем префикс на всякий случай
     if dsn.startswith("postgres://"):
         dsn = "postgresql://" + dsn[len("postgres://"):]
     return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Схема/DDL
+# DDL / структура
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _detect_user_table(engine) -> str:
     insp = inspect(engine)
-    names = {n.lower() for n in insp.get_table_names()}
+    names = {t.lower() for t in insp.get_table_names()}
     if "klim101" in names:
         return "klim101"
     if "user" in names:
-        return '"user"'  # зарезервированное слово
+        return '"user"'
     return "klim101"
 
-def ensure_db():
+def _ensure_db_impl():
     eng = get_engine()
     user_tbl = _detect_user_table(eng)
-
     ddl_user = f"""
     CREATE TABLE IF NOT EXISTS {user_tbl} (
         id         BIGINT PRIMARY KEY,
@@ -87,7 +73,7 @@ def ensure_db():
             SELECT 1 FROM pg_indexes WHERE indexname = 'ux_log_user_project_date'
         ) THEN
             CREATE UNIQUE INDEX ux_log_user_project_date
-                ON log (user_id, project_id, work_date);
+            ON log (user_id, project_id, work_date);
         END IF;
     END $$;
     """
@@ -100,14 +86,19 @@ def ensure_db():
         except Exception:
             pass
 
+@st.cache_resource(show_spinner=False)
+def ensure_db_once():
+    _ensure_db_impl()
+    return True
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Модель недели + запросы
+# Модель недели + выборки
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TimesheetWeek:
     monday: date
-    dates: List[date]  # 7 дат Пн–Вс
+    dates: List[date]  # 7 дней: Пн..Вс
 
     @staticmethod
     def from_any(d: date | datetime | None = None) -> "TimesheetWeek":
@@ -119,8 +110,8 @@ class TimesheetWeek:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_projects() -> pd.DataFrame:
-    eng = get_engine()
-    return pd.read_sql(text("SELECT id, name FROM project ORDER BY name"), eng)
+    q = text("SELECT id, name FROM project ORDER BY name")
+    return pd.read_sql(q, get_engine())
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_users() -> pd.DataFrame:
@@ -129,100 +120,72 @@ def fetch_users() -> pd.DataFrame:
     q = text(f"SELECT id, first_name, tg_id FROM {user_tbl} ORDER BY first_name")
     return pd.read_sql(q, eng)
 
-def fetch_week_hours(user_id: int, week: TimesheetWeek) -> pd.DataFrame:
-    eng = get_engine()
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_week_rows(user_id: int, week: TimesheetWeek) -> pd.DataFrame:
+    """
+    Отдаёт строки лога этой недели: project_id, work_date(date), hours(float)
+    """
     q = text("""
-        SELECT project_id, work_date, SUM(hours) AS hours
+        SELECT project_id, work_date, hours
         FROM log
-        WHERE user_id = :uid AND work_date BETWEEN :d1 AND :d7
-        GROUP BY project_id, work_date
+        WHERE user_id=:uid AND work_date BETWEEN :d1 AND :d7
+        ORDER BY work_date, project_id
     """)
-    df = pd.read_sql(q, eng, params={"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]})
+    df = pd.read_sql(q, get_engine(), params={"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]})
+    if not df.empty:
+        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
+        df["project_id"] = df["project_id"].astype(int)
+        df["hours"] = df["hours"].astype(float)
     return df
 
-def _next_log_ids(con, n: int) -> List[int]:
-    start = int(con.execute(text("SELECT COALESCE(MAX(id), 0) FROM log")).scalar() or 0) + 1
+def _next_ids(con, n: int) -> List[int]:
+    cur = con.execute(text("SELECT COALESCE(MAX(id), 0) FROM log"))
+    start = int(cur.scalar() or 0) + 1
     return list(range(start, start + n))
 
-def upsert_week(payload_rows: List[Dict], user_id: int, week: TimesheetWeek) -> None:
+def save_week_replace(user_id: int, week: TimesheetWeek, tuples: List[Tuple[int, date, float]]) -> int:
     """
-    Принимает список вида:
-      [{"project_id": 11, "hours": {<date>: 2.0, ...}}, ...]
-    ИЛИ построчно:
-      [{"project_id": 11, "work_date": <date>, "hours": 2.0}, ...]
-    Полностью перезаписывает часы недели для переданных (user, project, day).
+    tuples: [(project_id, work_date, hours), ...]
+    Алгоритм: DELETE (неделя, пользователь) -> INSERT текущих строк.
+    Возвращает, сколько записей вставлено.
     """
-    # Нормализуем к форме с картой дат
-    normalized: Dict[int, Dict[date, float]] = {}
-    for row in payload_rows:
-        pid = int(row["project_id"])
-        if "work_date" in row:
-            d = row["work_date"]
-            if isinstance(d, str):
-                d = datetime.fromisoformat(d).date()
-            h = float(row.get("hours") or 0.0)
-            if h > 0:
-                normalized.setdefault(pid, {}).setdefault(d, 0.0)
-                normalized[pid][d] += h  # суммируем, если несколько строк на день
-        else:
-            for d, h in (row.get("hours") or {}).items():
-                if isinstance(d, str):
-                    d = datetime.fromisoformat(d).date()
-                h = float(h or 0.0)
-                if h > 0:
-                    normalized.setdefault(pid, {})[d] = h
-
-    inserts: List[Tuple[int,int,int,date,float]] = []
-    deletes: List[Tuple[int,int,date]] = []
-
-    for pid, daymap in normalized.items():
-        for d in week.dates:
-            val = float(daymap.get(d, 0.0))
-            if val > 0:
-                inserts.append((0, user_id, pid, d, val))
-            else:
-                deletes.append((user_id, pid, d))
-
     eng = get_engine()
     with eng.begin() as con:
-        if deletes:
-            con.execute(
-                text("""
-                    DELETE FROM log
-                     WHERE (user_id, project_id, work_date) IN (
-                        SELECT * FROM UNNEST(:uids::bigint[], :pids::bigint[], :dates::date[])
-                     )
-                """),
-                params={
-                    "uids": [u for (u, _, _) in deletes],
-                    "pids": [p for (_, p, _) in deletes],
-                    "dates": [d for (_, _, d) in deletes],
-                },
-            )
-        if inserts:
-            ids  = _next_log_ids(con, len(inserts))
-            uids = [u for (_, u, _, _, _) in inserts]
-            pids = [p for (_, _, p, _, _) in inserts]
-            dts  = [d for (_, _, _, d, _) in inserts]
-            hrs  = [h for (_, _, _, _, h) in inserts]
+        con.execute(
+            text("DELETE FROM log WHERE user_id=:uid AND work_date BETWEEN :d1 AND :d7"),
+            {"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]},
+        )
+        if not tuples:
+            return 0
+        ids  = _next_ids(con, len(tuples))
+        uids = [user_id] * len(tuples)
+        pids = [pid for (pid, _, _) in tuples]
+        dts  = [dt for (_, dt, _) in tuples]
+        hrs  = [hh for (_, _, hh) in tuples]
+        try:
             con.execute(
                 text("""
                   INSERT INTO log (id, user_id, project_id, work_date, hours)
-                  SELECT * FROM UNNEST(:ids::bigint[], :uids::bigint[], :pids::bigint[],
-                                       :dts::date[], :hrs::float[])
-                  ON CONFLICT (user_id, project_id, work_date) DO UPDATE
-                    SET hours = EXCLUDED.hours
+                  SELECT * FROM UNNEST(:ids::bigint[], :uids::bigint[], :pids::bigint[], :dts::date[], :hrs::float[])
                 """),
-                params={"ids": ids, "uids": uids, "pids": pids, "dts": dts, "hrs": hrs},
+                {"ids": ids, "uids": uids, "pids": pids, "dts": dts, "hrs": hrs},
             )
+        except Exception:
+            # Фолбек на executemany, если UNNEST не поддерживается окружением
+            for i in range(len(tuples)):
+                con.execute(
+                    text("INSERT INTO log (id, user_id, project_id, work_date, hours) VALUES (:id, :uid, :pid, :dt, :hr)"),
+                    {"id": ids[i], "uid": uids[i], "pid": pids[i], "dt": dts[i], "hr": hrs[i]},
+                )
+        return len(tuples)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Query params helpers (новый API + fallback на experimental)
+# Query params helpers (универсально для новых/старых Streamlit)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def qp_get(name: str, default=None):
     try:
-        v = st.query_params.get(name, default)  # новый API
+        v = st.query_params.get(name, default)
     except Exception:
         try:
             v = st.experimental_get_query_params().get(name, [default])[0]
@@ -242,7 +205,7 @@ def qp_update(**kwargs):
         except Exception:
             current = {}
         current.update({k: [v] for k, v in payload.items()})
-        st.experimental_set_query_params(**{k: vv[0] if isinstance(vv, list) else vv for k, vv in current.items()})
+        st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv) for k, vv in current.items()})
 
 def qp_delete(*names):
     try:
@@ -256,29 +219,32 @@ def qp_delete(*names):
             current = {}
         for n in names:
             current.pop(n, None)
-        st.experimental_set_query_params(**{k: vv[0] if isinstance(vv, list) else vv for k, vv in current.items()})
+        st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv) for k, vv in current.items()})
 
 # ──────────────────────────────────────────────────────────────────────────────
-# UI helpers (CSS, выбор пользователя)
+# UI: выпадающие списки по дням, автодобавление строк, гидратация из БД
 # ──────────────────────────────────────────────────────────────────────────────
+
+PROJECT_PLACEHOLDER = "Выберите проект…"
+HOURS_PLACEHOLDER   = "часы…"
+# кратные 0.25 до 12
+HOUR_CHOICES = [x / 4 for x in range(1, 49)]  # 0.25..12.0
 
 _CSS = """
 <style>
-.block-container {padding-top: 1.2rem; max-width: 1100px;}
-.small {font-size: 12px; color:#666;}
-.day-card {padding: 10px 14px; border: 1px solid #eee; border-radius: 12px; margin-bottom: 10px;}
-.day-title {font-weight: 700; margin-bottom: 6px;}
-.hr {height:1px; background:#eee; border:0; margin:12px 0;}
+.block-container{padding-top:1.2rem;max-width:1200px}
+.day-card{border:1px solid #eee;border-radius:12px;padding:10px 12px;margin-bottom:10px}
+.day-title{font-weight:700;margin-bottom:6px}
+.small{font-size:12px;color:#777}
 </style>
 """
 
-HOUR_CHOICES = [0.5 * i for i in range(1, 25)]  # 0.5..12.0
-PROJECT_PLACEHOLDER = "— выберите проект —"
-HOURS_PLACEHOLDER = "— ч —"
-
 def _fmt_hours(v):
-    if isinstance(v, (int, float)): return f"{float(v):g} ч"
-    return HOURS_PLACEHOLDER
+    try:
+        f = float(v)
+        return f"{f:g}"
+    except Exception:
+        return str(v)
 
 def _get_saved_uid() -> Optional[int]:
     uid = qp_get("uid")
@@ -302,82 +268,33 @@ def _clear_saved_uid() -> None:
     st.session_state.pop("uid", None)
     qp_delete("uid")
 
-def _header_controls(users: pd.DataFrame) -> Tuple[int, TimesheetWeek]:
-    st.markdown(_CSS, unsafe_allow_html=True)
-    st.subheader("⏱️ Timesheet")
+def _hydrate_week_state(ctx: str, user_id: int, week: TimesheetWeek, projects: pd.DataFrame):
+    """
+    Заполняем st.session_state[*] строками из БД один раз для пары (user, week).
+    """
+    sig_key = f"{ctx}_hydrated_sig"
+    signature = f"{user_id}:{week.monday.isoformat()}"
+    if st.session_state.get(sig_key) == signature:
+        return  # уже гидрировано
 
-    col1, col2, col3 = st.columns([1.1, 1.6, 2])
-    with col1:
-        picked = st.date_input("Неделя", value=date.today(), format="DD.MM.YYYY")
-        week = TimesheetWeek.from_any(picked)
+    df = fetch_week_rows(user_id, week)
+    pid2name = {int(i): str(n) for i, n in projects[["id", "name"]].values}
 
-    saved_uid = _get_saved_uid()
-    valid_ids = set(users["id"].astype(int).tolist())
-    user_id: Optional[int] = None
+    for d in week.dates:
+        key = f"ts_rows_{ctx}_{d.isoformat()}"
+        # соберём строки по этому дню из БД
+        day_rows = []
+        if not df.empty:
+            day_df = df[df["work_date"] == d]
+            for _, r in day_df.iterrows():
+                pname = pid2name.get(int(r["project_id"]))
+                if pname:
+                    day_rows.append({"project": pname, "hours": float(r["hours"])})
+        # обязательно последняя пустая строка для автодобавления
+        day_rows.append({"project": None, "hours": None})
+        st.session_state[key] = day_rows
 
-    with col2:
-        choose_mode = st.session_state.get("ts_choose_user", saved_uid is None)
-        if (not choose_mode) and saved_uid and int(saved_uid) in valid_ids:
-            row = users[users["id"] == int(saved_uid)].iloc[0]
-            st.markdown(f"**Пользователь:** {row['first_name']} · id={int(row['id'])}")
-            if st.button("Сменить пользователя"):
-                _clear_saved_uid()
-                st.session_state["ts_choose_user"] = True
-                st.rerun()
-            user_id = int(saved_uid)
-        else:
-            ids = users["id"].astype(int).tolist()
-            labels = {int(r.id): f"{r.first_name} · id={int(r.id)}" for r in users.itertuples(index=False)}
-            default_idx = 0
-            default_tg = st.secrets.get("DEFAULT_TG_ID")
-            if default_tg:
-                try:
-                    default_idx = users.index[users["tg_id"] == int(default_tg)][0]
-                except Exception:
-                    default_idx = 0
-            if saved_uid and int(saved_uid) in ids:
-                default_idx = ids.index(int(saved_uid))
-
-            selected_id = st.selectbox(
-                "Выберите пользователя (один раз)",
-                options=ids,
-                index=default_idx if 0 <= default_idx < len(ids) else 0,
-                format_func=lambda i: labels.get(int(i), f"id={i}"),
-                key="ts_select_user",
-            )
-            if st.button("✅ Выбрать этого пользователя"):
-                _save_uid(int(selected_id))
-                st.session_state["ts_choose_user"] = False
-                st.rerun()
-
-    with col3:
-        st.caption(
-            f"Неделя: {week.dates[0].strftime('%d.%m.%Y')} — {week.dates[-1].strftime('%d.%m.%Y')}. "
-            "В каждой строке выберите проект и часы. Пустая строка добавляется автоматически."
-        )
-
-    if user_id is None:
-        st.stop()
-
-    return user_id, week
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Nika-style day blocks
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _ctx_key(user_id, week):
-    return f"{int(user_id)}::{week.monday.isoformat()}"
-
-def _init_day_from_db(ctx: str, day: date, df: pd.DataFrame, pid2name: Dict[int, str]):
-    key = f"ts_rows_{ctx}_{day.isoformat()}"
-    if key in st.session_state:
-        return
-    rows = []
-    day_df = df[df["work_date"].dt.date == day] if not df.empty else df
-    for _, r in day_df.iterrows():
-        rows.append({"project": pid2name.get(int(r["project_id"])), "hours": float(r["hours"])})
-    rows.append({"project": None, "hours": None})  # пустая строка в конце
-    st.session_state[key] = rows
+    st.session_state[sig_key] = signature
 
 def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
     key = f"ts_rows_{ctx}_{day.isoformat()}"
@@ -406,7 +323,8 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
         with c2:
             hrs_val = st.selectbox(
                 "Часы", hrs_opts, index=_idx(hrs_opts, row["hours"]),
-                key=f"{pref}_h", label_visibility="collapsed", format_func=_fmt_hours,
+                key=f"{pref}_h", label_visibility="collapsed",
+                format_func=_fmt_hours,
             )
         with c3:
             can_rm = not (len(rows) == 1 and proj_val == PROJECT_PLACEHOLDER and hrs_val == HOURS_PLACEHOLDER)
@@ -418,6 +336,7 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
             "hours":   None if hrs_val == HOURS_PLACEHOLDER else float(hrs_val),
         }
 
+    # удаление → мгновенно перерисуемся
     if to_delete:
         for i in sorted(to_delete, reverse=True):
             rows.pop(i)
@@ -426,90 +345,148 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
         st.session_state[key] = rows
         st.rerun()
 
+    # последняя строка стала заполненной → добавим новую и перерисуемся
     if rows and rows[-1]["project"] is not None and rows[-1]["hours"] is not None:
         rows.append({"project": None, "hours": None})
         st.session_state[key] = rows
+        st.rerun()
 
     day_total = sum(float(r["hours"]) for r in rows if r["project"] and r["hours"] is not None)
     st.caption(f"Итого за день: {day_total:g} ч")
     st.markdown('</div>', unsafe_allow_html=True)
     return day_total
 
-def _collect_payload(ctx: str, week: TimesheetWeek, name2pid: Dict[str, int]) -> List[Dict]:
-    """Превращаем state в структуру для upsert_week (соберём в карту дат по проекту)."""
-    per_project: Dict[int, Dict[date, float]] = {}
+def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: Dict[str, int]) -> List[Tuple[int, date, float]]:
+    out: List[Tuple[int, date, float]] = []
     for d in week.dates:
         rows = st.session_state.get(f"ts_rows_{ctx}_{d.isoformat()}", [])
         for r in rows:
             proj, hrs = r.get("project"), r.get("hours")
             if proj and hrs and hrs > 0:
                 pid = name2pid.get(str(proj))
-                if pid is None:
-                    continue
-                per_project.setdefault(int(pid), {})
-                per_project[int(pid)][d] = per_project[int(pid)].get(d, 0.0) + float(hrs)
-
-    # в формат upsert_week
-    out = [{"project_id": pid, "hours": hmap} for pid, hmap in per_project.items()]
+                if pid:
+                    out.append((int(pid), d, float(hrs)))
     return out
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public API (не меняем имя — чтобы un.py ничего не трогать)
+# Заголовок/контролы и рендер вкладки
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]:
+    st.markdown(_CSS, unsafe_allow_html=True)
+    st.subheader("⏱️ Timesheet")
+
+    col1, col2 = st.columns([1.2, 1.8])
+    with col1:
+        picked = st.date_input("Неделя", value=date.today(), format="DD.MM.YYYY")
+        week = TimesheetWeek.from_any(picked)
+
+    saved_uid = _get_saved_uid()
+    valid_ids = set(users["id"].astype(int).tolist())
+
+    with col2:
+        choose_mode = st.session_state.get("ts_choose_user", saved_uid is None)
+
+        if (not choose_mode) and saved_uid and int(saved_uid) in valid_ids:
+            row = users[users["id"] == int(saved_uid)].iloc[0]
+            st.markdown(f"**Пользователь:** {row['first_name']} · id={int(row['id'])}")
+            c11, c12 = st.columns([1, 1])
+            with c11:
+                if st.button("Сменить пользователя"):
+                    _clear_saved_uid()
+                    st.session_state["ts_choose_user"] = True
+                    st.rerun()
+            with c12:
+                if st.button("🔄 Обновить из БД"):
+                    # сбросим «сигнатуру» гидратации, чтобы перечитать
+                    for k in list(st.session_state.keys()):
+                        if "_hydrated_sig" in k:
+                            del st.session_state[k]
+                    st.rerun()
+            uid = int(saved_uid)
+        else:
+            ids = users["id"].astype(int).tolist()
+            labels = {int(r.id): f"{r.first_name}  ·  id={int(r.id)}" for r in users.itertuples(index=False)}
+
+            default_idx = 0
+            default_tg = st.secrets.get("DEFAULT_TG_ID")
+            if default_tg:
+                try:
+                    default_idx = users.index[users["tg_id"] == int(default_tg)][0]
+                except Exception:
+                    default_idx = 0
+            if saved_uid and int(saved_uid) in ids:
+                default_idx = ids.index(int(saved_uid))
+
+            selected_id = st.selectbox(
+                "Выберите пользователя (один раз)",
+                options=ids,
+                index=default_idx if 0 <= default_idx < len(ids) else 0,
+                format_func=lambda i: labels.get(int(i), f"id={i}"),
+                key="ts_select_user",
+            )
+            if st.button("✅ Выбрать этого пользователя"):
+                _save_uid(int(selected_id))
+                st.session_state["ts_choose_user"] = False
+                st.rerun()
+            uid = None
+
+    return uid, week
+
 def render_timesheet_tab():
-    """Вызвать внутри вкладки '⏱️ Timesheet'."""
-    ensure_db()
+    ensure_db_once()
+
     projects = fetch_projects()
     users = fetch_users()
-
     if projects.empty or users.empty:
-        st.info("Добавьте хотя бы одного пользователя и проект в БД, чтобы начать работу.")
+        st.info("Добавьте хотя бы одного пользователя и проект.")
         st.stop()
 
     user_id, week = _header_controls(users)
-    ctx = _ctx_key(user_id, week)
+    if not user_id:
+        st.stop()
 
-    # Смена пользователя/недели → сброс локального стейта и предзаполнение из БД
-    if st.session_state.get("ts_ctx") != ctx:
-        # очистить старые дневные ключи
-        for k in list(st.session_state.keys()):
-            if k.startswith("ts_rows_"):
-                del st.session_state[k]
-        st.session_state["ts_ctx"] = ctx
+    # контекст на пару (user, week)
+    ctx = f"u{user_id}_{week.monday.isoformat()}"
 
-        df = fetch_week_hours(user_id, week).copy()
-        if not df.empty and not pd.api.types.is_datetime64_any_dtype(df["work_date"]):
-            df["work_date"] = pd.to_datetime(df["work_date"])
-        pid2name = dict(projects[["id", "name"]].values)
-        for d in week.dates:
-            _init_day_from_db(ctx, d, df, pid2name)
+    # один раз при заходе/смене недели/пользователя — заполним UI из БД
+    _hydrate_week_state(ctx, user_id, week, projects)
 
-    # Справочники для селектов
-    name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].itertuples(index=False)}
-    proj_names = [str(x) for x in sorted(projects["name"].tolist(), key=str.lower)]
+    # сетка дней
+    st.markdown(
+        f"<div class='small'>Неделя: <b>{week.dates[0].strftime('%d.%m.%Y')}</b> — "
+        f"<b>{week.dates[-1].strftime('%d.%m.%Y')}</b>. Заполняйте проект и часы, новые строки добавляются автоматически.</div>",
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-
-    # Рисуем 7 блоков дней
-    week_total = 0.0
+    proj_names = projects["name"].astype(str).tolist()
+    totals = []
     for d in week.dates:
-        week_total += _render_day(ctx, d, proj_names)
+        totals.append(_render_day(ctx, d, proj_names))
 
-    # Кнопки и подсказки
+    st.markdown("---")
     c1, c2 = st.columns([1, 4])
     with c1:
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
-            payload = _collect_payload(ctx, week, name2pid)
+            name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
+            tuples = _collect_rows_by_day(ctx, week, name2pid)
             try:
-                upsert_week(payload, user_id, week)
-                st.success("Сохранено ✔")
-                fetch_week_hours.clear()
+                n = save_week_replace(user_id, week, tuples)
+                fetch_week_rows.clear()  # сброс кеша
+                # после сохранения заново гидрируем из БД, чтобы UI = факт
+                for k in list(st.session_state.keys()):
+                    if "_hydrated_sig" in k:
+                        del st.session_state[k]
+                st.success(f"Сохранено: {n} записей ✔")
                 st.rerun()
             except Exception as e:
                 st.error(f"Ошибка сохранения: {e}")
     with c2:
-        st.caption("Строки добавляются автоматически. ✖ удаляет строку. "
-                   "Чтобы сменить пользователя — нажмите «Сменить пользователя» выше.")
+        st.markdown(
+            "<span class='small'>Неделя сохраняется целиком: старые строки удаляются, новые вставляются. "
+            "Это исключает дубли и гарантирует корректную замену проекта/часов.</span>",
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(f"**Итого за неделю:** {week_total:g} ч")
+    total_week = sum(totals)
+    st.markdown(f"**Итого за неделю:** {total_week:g} ч")
