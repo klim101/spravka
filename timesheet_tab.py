@@ -82,28 +82,25 @@ from sqlalchemy import create_engine, text, inspect
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 def _dsn_from_secrets() -> str:
-    # Берём ТОЛЬКО готовую строку подключения
+    import os, streamlit as st
+
     dsn = (
         st.secrets.get("POSTGRES_DSN")
         or st.secrets.get("SUPABASE_DB_URL")
         or os.getenv("DATABASE_URL")
     )
     if not dsn:
-        raise RuntimeError(
-            "Нет строки подключения. Добавь POSTGRES_DSN (или SUPABASE_DB_URL) в Streamlit Secrets."
-        )
+        raise RuntimeError("Не найден DSN к PostgreSQL Supabase. Добавьте POSTGRES_DSN (или SUPABASE_DB_URL) в st.secrets.")
 
-    # Нормализуем префикс под SQLAlchemy + psycopg2
-    if dsn.startswith("postgres://"):
-        dsn = dsn.replace("postgres://", "postgresql+psycopg2://", 1)
-    elif dsn.startswith("postgresql://") and "+psycopg2" not in dsn:
-        dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
+    # Нормализуем префикс:
+    dsn = dsn.replace("postgres://", "postgresql://", 1)
 
-    # Гарантируем sslmode=require (для Supabase обязательно)
-    parts = urlsplit(dsn)
-    qs = dict(parse_qsl(parts.query, keep_blank_values=True))
-    qs.setdefault("sslmode", "require")
-    dsn = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(qs), parts.fragment))
+    # Всегда используем pg8000 + SSL
+    if dsn.startswith("postgresql://"):
+        dsn = dsn.replace("postgresql://", "postgresql+pg8000://", 1)
+    if ("sslmode=" not in dsn) and ("ssl=" not in dsn):
+        dsn += ("&" if "?" in dsn else "?") + "ssl=true"
+
     return dsn
 
 
@@ -590,6 +587,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
