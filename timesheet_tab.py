@@ -79,35 +79,33 @@ from sqlalchemy import create_engine, text, inspect
 # DB utilities
 # ──────────────────────────────────────────────────────────────────────────────
 
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
 def _dsn_from_secrets() -> str:
+    # Берём ТОЛЬКО готовую строку подключения
     dsn = (
         st.secrets.get("POSTGRES_DSN")
         or st.secrets.get("SUPABASE_DB_URL")
         or os.getenv("DATABASE_URL")
     )
     if not dsn:
-        host = st.secrets.get("SUPA_HOST")
-        db   = st.secrets.get("SUPA_DB")
-        user = st.secrets.get("SUPA_USER")
-        pwd  = st.secrets.get("SUPA_PASSWORD")
-        if all([host, db, user, pwd]):
-            from urllib.parse import quote_plus
-            pwd_q = quote_plus(pwd)  # на случай спецсимволов
-            dsn = f"postgresql+psycopg2://{user}:{pwd_q}@{host}:5432/{db}"
-        else:
-            raise RuntimeError(
-                "Не найден DSN к PostgreSQL Supabase. "
-                "Добавьте POSTGRES_DSN (или SUPABASE_DB_URL) в st.secrets "
-                "или SUPA_HOST/SUPA_DB/SUPA_USER/SUPA_PASSWORD."
-            )
+        raise RuntimeError(
+            "Нет строки подключения. Добавь POSTGRES_DSN (или SUPABASE_DB_URL) в Streamlit Secrets."
+        )
 
-    # Нормализуем префикс для SQLAlchemy+psycopg2
+    # Нормализуем префикс под SQLAlchemy + psycopg2
     if dsn.startswith("postgres://"):
         dsn = dsn.replace("postgres://", "postgresql+psycopg2://", 1)
     elif dsn.startswith("postgresql://") and "+psycopg2" not in dsn:
         dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
 
+    # Гарантируем sslmode=require (для Supabase обязательно)
+    parts = urlsplit(dsn)
+    qs = dict(parse_qsl(parts.query, keep_blank_values=True))
+    qs.setdefault("sslmode", "require")
+    dsn = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(qs), parts.fragment))
     return dsn
+
 
 
 
@@ -592,6 +590,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
