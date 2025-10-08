@@ -28,35 +28,49 @@ from sqlalchemy.engine import URL
 
 import socket
 import psycopg2
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 
 @st.cache_resource(show_spinner=False)
 def get_engine():
-    from sqlalchemy import create_engine
-    from urllib.parse import quote_plus
-
-    # 1) Если задан POSTGRES_DSN — нормализуем его под pg8000+SSL
-    dsn = (st.secrets.get("POSTGRES_DSN") or "").strip()
+    # 1) Если есть готовый DSN в секретах/переменных — используем его БЕЗ вариантов
+    dsn = (
+        st.secrets.get("POSTGRES_DSN")
+        or st.secrets.get("SUPABASE_DB_URL")
+        or os.getenv("DATABASE_URL")
+    )
     if dsn:
-        if dsn.startswith("postgresql://"):
-            dsn = dsn.replace("postgresql://", "postgresql+pg8000://", 1)
-        dsn = dsn.replace("+psycopg2", "+pg8000")
-        if ("ssl=" not in dsn) and ("sslmode=" not in dsn):
-            dsn += ("&" if "?" in dsn else "?") + "ssl=true"
-        return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800)
+        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
+        # Небольшая проверка и подсказка, каким драйвером реально подключились
+        try:
+            with eng.connect() as c:
+                c.exec_driver_sql("SELECT 1")
+            st.caption(f"DB OK · {eng.dialect.name}+{eng.dialect.driver}")
+        except Exception as e:
+            st.error(f"Не удалось подключиться по POSTGRES_DSN: {e}")
+            st.stop()
+        return eng
 
-    # 2) Иначе собираем DSN из SUPA_* секретов
-    host = st.secrets["SUPA_HOST"]                      # db.hvntnpffdnywlxhlrxcm.supabase.co
-    db   = st.secrets.get("SUPA_DB", "postgres")
+    # 2) Запасной путь (если вдруг DSN не дали): собираем URL под pg8000 с SSL
+    host = st.secrets["SUPA_HOST"]
     user = st.secrets.get("SUPA_USER", "postgres")
     pwd  = st.secrets["SUPA_PASSWORD"]
+    db   = st.secrets.get("SUPA_DB", "postgres")
 
-    # пароль обязательно URL-экранируем на случай @,#,%
-    dsn = (
-        f"postgresql+pg8000://{user}:{quote_plus(pwd)}@{host}:5432/{db}"
-        f"?ssl=true"
+    url = URL.create(
+        "postgresql+pg8000",
+        username=user,
+        password=pwd,
+        host=host,
+        port=5432,
+        database=db,
+        query={"ssl": "true"},
     )
-    return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800)
+    eng = create_engine(url, pool_pre_ping=True, pool_recycle=1800, future=True)
+    with eng.connect() as c:
+        c.exec_driver_sql("SELECT 1")
+    st.caption(f"DB OK · {eng.dialect.name}+{eng.dialect.driver}")
+    return eng
 
 
 
@@ -582,6 +596,7 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
 
