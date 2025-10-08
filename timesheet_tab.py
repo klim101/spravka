@@ -25,44 +25,42 @@ from __future__ import annotations
 import streamlit as st
 from sqlalchemy.engine import URL
 
-def get_engine():
-    # ленивые импорты после _ensure_deps()
-    create_engine, _, _ = _sa()
 
-    # 1) читаем части из секретов
-    host = st.secrets.get("SUPA_HOST")
+import socket
+import psycopg2
+from sqlalchemy import create_engine
+
+@st.cache_resource(show_spinner=False)
+def get_engine():
+    host = st.secrets["SUPA_HOST"]           # db.hvntnpffdnywlxhlrxcm.supabase.co
+    port = 5432
     db   = st.secrets.get("SUPA_DB", "postgres")
     user = st.secrets.get("SUPA_USER", "postgres")
-    pwd  = st.secrets.get("SUPA_PASSWORD")
+    pwd  = st.secrets["SUPA_PASSWORD"]
 
-    missing = [k for k,v in {"SUPA_HOST":host,"SUPA_PASSWORD":pwd}.items() if not v]
-    if missing:
-        st.error(f"В Secrets нет: {', '.join(missing)}. Зайди в Settings → Secrets и добавь.")
-        st.stop()
+    # Форсим IPv4: достаём A-запись (AF_INET), берём IP и передаём как hostaddr,
+    # при этом оставляем host=FQDN для корректного TLS.
+    ipv4 = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
 
-    # 2) собираем безопасный URL (пароль будет корректно экранирован)
-    url = URL.create(
-        drivername="postgresql+psycopg2",
-        username=user,
-        password=pwd,
-        host=host,
-        port=5432,
-        database=db,
-        query={"sslmode": "require"},   # Supabase требует SSL
+    def _creator():
+        return psycopg2.connect(
+            host=host,
+            hostaddr=ipv4,     # ключевая строка — форсим IPv4
+            port=port,
+            dbname=db,
+            user=user,
+            password=pwd,
+            sslmode="require",
+        )
+
+    # URL пустой (dialect+driver), коннектор даём через creator()
+    eng = create_engine(
+        "postgresql+psycopg2://",
+        creator=_creator,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        future=True,
     )
-
-    eng = create_engine(url, pool_pre_ping=True, pool_recycle=1800)
-
-    # 3) быстрая проверка соединения (даст понятную ошибку)
-    try:
-        with eng.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-    except Exception as e:
-        st.error("Не могу подключиться к Supabase. Проверь хост/пароль/SSL.")
-        st.write("DSN (без пароля):", url.render_as_string(hide_password=True))
-        st.exception(e)   # покажет первопричину
-        st.stop()
-
     return eng
 
 
@@ -583,5 +581,6 @@ def render_timesheet_tab():
 
     total_week = float(edited["Итого"].sum()) if not edited.empty else 0.0
     st.markdown(f"**Итого за неделю:** {total_week:.2f} ч")
+
 
 
