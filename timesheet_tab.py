@@ -18,12 +18,15 @@ from sqlalchemy import create_engine, inspect, text
 def get_engine():
     dsn = st.secrets.get("POSTGRES_DSN", "")
     if not dsn:
-        # не стопаем приложение — бросаем исключение, вкладка поймает и вернётся
-        raise RuntimeError("В secrets нет POSTGRES_DSN (строка подключения к Supabase).")
+        st.error(
+            "В secrets нет POSTGRES_DSN. Укажи строку для Supabase Pooler "
+            "(например, postgresql+psycopg2://postgres.<proj>:***@aws-1-...pooler.supabase.com:5432/postgres?sslmode=require)"
+        )
+        st.stop()
+    # нормализуем префикс на всякий случай
     if dsn.startswith("postgres://"):
         dsn = "postgresql://" + dsn[len("postgres://"):]
     return create_engine(dsn, pool_pre_ping=True, pool_recycle=1800, future=True)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DDL / структура
@@ -505,75 +508,66 @@ def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[
 
 
 def render_timesheet_tab():
-    """Вкладка Timesheet: безопасный рендер и автосохранение всей недели."""
-    # 1) БД и справочники — НЕ роняем всё приложение, если что-то сломалось
-    try:
-        ensure_db_once()
-        projects = fetch_projects()
-        users = fetch_users()
-    except Exception as e:
-        st.error(f"Timesheet временно недоступен: {e}")
-        return
+    """Вкладка Timesheet: теперь с автосохранением недели при любом изменении."""
+    ensure_db_once()
 
+    projects = fetch_projects()
+    users = fetch_users()
     if projects.empty or users.empty:
         st.info("Добавьте хотя бы одного пользователя и проект.")
         return
 
-    # 2) Выбор пользователя/недели
     user_id, week = _header_controls(users)
     if not user_id:
-        # Пользователь ещё не выбран — показываем только шапку и выходим,
-        # чтобы остальные вкладки продолжили рендериться
         return
 
-    # Контекст на пару (user, week)
+    # контекст на пару (user, week)
     ctx = f"u{user_id}_{week.monday.isoformat()}"
 
-    # 3) Однократно гидрируем UI из БД (без перерисовок)
+    # один раз при заходе/смене недели/пользователя — заполним UI из БД
     _hydrate_week_state(ctx, user_id, week, projects)
 
+    # сетка дней
     st.markdown(
         f"<div class='small'>Неделя: <b>{week.dates[0].strftime('%d.%m.%Y')}</b> — "
-        f"<b>{week.dates[-1].strftime('%d.%m.%Y')}</b>. Заполняйте проект и часы — строки добавляются автоматически.</div>",
+        f"<b>{week.dates[-1].strftime('%d.%m.%Y')}</b>. Заполняйте проект и часы, новые строки добавляются автоматически.</div>",
         unsafe_allow_html=True,
     )
 
-    # 4) Рендер по дням — колбэки внутри _render_day добавляют/удаляют строки без st.rerun
     proj_names = projects["name"].astype(str).tolist()
-    totals = [ _render_day(ctx, d, proj_names) for d in week.dates ]
+    totals = []
+    for d in week.dates:
+        totals.append(_render_day(ctx, d, proj_names))
 
-    # 5) Автосохранение (replace всей недели при любом изменении)
+    # ---------- АВТОСОХРАНЕНИЕ (replace всей недели) ----------
     name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
-    tuples = _collect_rows_by_day(ctx, week, name2pid)  # [(pid, date, hours), ...]
-
+    tuples = _collect_rows_by_day(ctx, week, name2pid)
+    
     import hashlib, json
     def _digest(rows):
         norm = sorted([(int(pid), d.isoformat(), float(hr)) for (pid, d, hr) in rows])
         return hashlib.md5(json.dumps(norm, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-
+    
     cur_hash = _digest(tuples)
     hash_key  = f"ts_last_hash_{ctx}"
-    dirty_key = f"ts_dirty_{ctx}"  # помечается колбэками
-
+    dirty_key = f"ts_dirty_{ctx}"
+    
     need_save = st.session_state.get(dirty_key, False) or (st.session_state.get(hash_key) != cur_hash)
-
+    
     if need_save:
         try:
-            n = save_week_replace(user_id, week, tuples)   # DELETE неделя -> INSERT текущих строк
-            fetch_week_rows.clear()                        # сброс кеша читаемой недели
+            n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
+            fetch_week_rows.clear()                       # сброс кеша читаемой недели
             st.session_state[hash_key]  = cur_hash
             st.session_state[dirty_key] = False
-            try:
-                st.toast(f"Автосохранено ({n} строк)")
-            except Exception:
-                pass  # на старых версиях Streamlit toast может отсутствовать
+            st.toast(f"Автосохранено ({n} строк)")
         except Exception as e:
             st.warning(f"Не удалось автосохранить: {e}")
-
-    # 6) Итого
-    st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
+    # ----------------------------------------------------------
 
 
+    total_week = sum(totals)
+    st.markdown(f"**Итого за неделю:** {total_week:g} ч")
 
 
 
