@@ -121,22 +121,25 @@ def fetch_users() -> pd.DataFrame:
     return pd.read_sql(q, eng)
 
 @st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_week_rows(user_id: int, week: TimesheetWeek) -> pd.DataFrame:
-    """
-    Отдаёт строки лога этой недели: project_id, work_date(date), hours(float)
-    """
+    eng = get_engine()
     q = text("""
-        SELECT project_id, work_date, hours
+        SELECT
+            project_id,
+            work_date,
+            SUM(hours) AS hours,
+            STRING_AGG(notes, ' | ' ORDER BY id) AS notes
         FROM log
-        WHERE user_id=:uid AND work_date BETWEEN :d1 AND :d7
+        WHERE user_id = :uid
+          AND work_date BETWEEN :d1 AND :d7
+        GROUP BY project_id, work_date
         ORDER BY work_date, project_id
     """)
-    df = pd.read_sql(q, get_engine(), params={"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]})
-    if not df.empty:
-        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
-        df["project_id"] = df["project_id"].astype(int)
-        df["hours"] = df["hours"].astype(float)
-    return df
+    return pd.read_sql(
+        q, eng,
+        params={"uid": user_id, "d1": week.dates[0], "d7": week.dates[-1]}
+    )
 
 def _next_ids(con, n: int) -> List[int]:
     cur = con.execute(text("SELECT COALESCE(MAX(id), 0) FROM log"))
@@ -265,37 +268,45 @@ def _clear_saved_uid() -> None:
     st.session_state.pop("uid", None)
 
 
-def _hydrate_week_state(ctx: str, user_id: int, week: TimesheetWeek, projects: pd.DataFrame):
-    """
-    Заполняем st.session_state[*] строками из БД один раз для пары (user, week).
-    """
+def _hydrate_week_state(ctx: str, user_id: int, week: TimesheetWeek, projects: pd.DataFrame) -> None:
+    """Заполняем st.session_state по данным из БД (один раз на (user, week))."""
     sig_key = f"{ctx}_hydrated_sig"
-    signature = f"{user_id}:{week.monday.isoformat()}"
-    if st.session_state.get(sig_key) == signature:
-        return  # уже гидрировано
+    if st.session_state.get(sig_key):
+        return
 
-    df = fetch_week_rows(user_id, week)
-    pid2name = {int(i): str(n) for i, n in projects[["id", "name"]].values}
+    df = fetch_week_rows(user_id, week)  # теперь есть колонка notes
+    pid2name = dict(projects[["id", "name"]].values)
 
     for d in week.dates:
-        key = f"ts_rows_{ctx}_{d.isoformat()}"
-        # соберём строки по этому дню из БД
-        day_rows = []
-        if not df.empty:
-            day_df = df[df["work_date"] == d]
-            for _, r in day_df.iterrows():
-                pname = pid2name.get(int(r["project_id"]))
-                if pname:
-                    day_rows.append({"project": pname, "hours": float(r["hours"])})
-        # обязательно последняя пустая строка для автодобавления
-        day_rows.append({"project": None, "hours": None})
-        st.session_state[key] = day_rows
+        day_key = f"ts_rows_{ctx}_{d.isoformat()}"
+        rows = []
+        cur = df[df["work_date"] == pd.to_datetime(d)]
+        for _, r in cur.iterrows():
+            rows.append({
+                "project": pid2name.get(int(r["project_id"]), None),
+                "hours":   float(r["hours"] or 0.0),
+                "notes":   (str(r["notes"]) if r["notes"] else "")
+            })
+        # всегда добавляем пустую строку в конец
+        rows.append({"project": None, "hours": None, "notes": ""})
+        st.session_state[day_key] = rows
 
-    st.session_state[sig_key] = signature
+    st.session_state[sig_key] = True
+
+def _on_notes_change(day_key: str, i: int, key_n: str, ctx: str):
+    """Колбэк для поля заметок: кладём текст в нужную строку дня и помечаем неделю как грязную."""
+    rows = st.session_state.get(day_key, [])
+    while i >= len(rows):
+        rows.append({"project": None, "hours": None, "notes": ""})
+    rows[i]["notes"] = st.session_state.get(key_n, "") or ""
+    st.session_state[day_key] = rows
+    st.session_state[f"ts_dirty_{ctx}"] = True
+
 
 def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
     day_key = f"ts_rows_{ctx}_{day.isoformat()}"
-    rows = st.session_state.setdefault(day_key, [{"project": None, "hours": None}])
+    # добавили поле notes в дефолтной строке
+    rows = st.session_state.setdefault(day_key, [{"project": None, "hours": None, "notes": ""}])
 
     proj_opts = [PROJECT_PLACEHOLDER] + project_names
     hrs_opts  = [HOURS_PLACEHOLDER] + HOUR_CHOICES
@@ -315,8 +326,10 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
         pref  = f"{day_key}_{i}"
         key_p = f"{pref}_p"
         key_h = f"{pref}_h"
+        key_n = f"{pref}_n"   # ключ для заметки
 
-        c1, c2, c3 = st.columns([3, 1, 0.6])
+        # добавили третью колонку "Notes" и подвинули кнопку удаления
+        c1, c2, c3, c4 = st.columns([3, 1, 2.6, 0.6])
 
         with c1:
             st.selectbox(
@@ -325,7 +338,7 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
                 index=_idx(proj_opts, row.get("project")),
                 key=key_p,
                 label_visibility="collapsed",
-                on_change=_on_row_change,
+                on_change=_on_row_change,           # твой существующий колбэк
                 args=(day_key, i, key_p, key_h, ctx),
             )
 
@@ -337,13 +350,28 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
                 key=key_h,
                 label_visibility="collapsed",
                 format_func=_fmt_hours,
-                on_change=_on_row_change,
+                on_change=_on_row_change,           # твой существующий колбэк
                 args=(day_key, i, key_p, key_h, ctx),
             )
 
         with c3:
-            # Кнопка удаления как колбэк (без ручного rerun)
-            can_rm = not (len(rows) == 1 and row.get("project") is None and row.get("hours") is None)
+            st.text_input(
+                "Notes",
+                value=row.get("notes", ""),
+                key=key_n,
+                label_visibility="collapsed",
+                placeholder="Заметки (необязательно)",
+                on_change=_on_notes_change,         # новый колбэк только для заметок
+                args=(day_key, i, key_n, ctx),
+            )
+
+        with c4:
+            # удалять можно, если строка не полностью пустая
+            can_rm = not (
+                (row.get("project") is None) and
+                (row.get("hours")   is None) and
+                (not row.get("notes"))
+            )
             st.button("✖", key=f"{pref}_rm", disabled=not can_rm,
                       on_click=_on_remove_row, args=(day_key, i, ctx))
 
@@ -354,6 +382,7 @@ def _render_day(ctx: str, day: date, project_names: List[str]) -> float:
     st.caption(f"Итого за день: {day_total:g} ч")
     st.markdown('</div>', unsafe_allow_html=True)
     return day_total
+
 
 
 def _on_row_change(day_key: str, idx: int, key_proj: str, key_hrs: str, ctx: str):
@@ -576,6 +605,7 @@ def render_timesheet_tab():
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
+
 
 
 
