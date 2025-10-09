@@ -3310,19 +3310,29 @@ def run_news_run_tab() -> None:
 # ─────────────────────────────────────────────────────────
 # 5. Вкладки приложения: добавляем News Run между AI-Insight и Advance Eye
 # ─────────────────────────────────────────────────────────
-tab_ts, tab_ai, tab_news, tab_eye = st.tabs(
-    ["⏱️ Timesheet", "📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"]
-)
+NAV_TABS = ["⏱️ Timesheet", "📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"]
 
-with tab_ts:
-    # nikabot-style форма учёта времени (autoselect пользователя, недельная сетка)
+def _select_nav() -> str:
+    default = st.session_state.get("active_tab", NAV_TABS[0])
+    try:
+        # Streamlit ≥ 1.40 — красивый переключатель
+        active = st.segmented_control("", NAV_TABS, default=default, key="active_tab")
+    except Exception:
+        # Фоллбек для старых версий
+        active = st.sidebar.radio("Раздел", NAV_TABS, index=NAV_TABS.index(default), key="active_tab")
+    st.session_state["active_tab"] = active
+    return active
+
+active = _select_nav()
+
+# ВАЖНО: никаких импортов из самого un.py — просто вызываем функции
+if active.startswith("⏱️"):
+    # лениво импортируем тяжёлую вкладку
+    from timesheet_tab import render_timesheet_tab
     render_timesheet_tab()
-
-with tab_ai:
+elif active.startswith("📊"):
     run_ai_insight_tab()
-
-with tab_news:
+elif active.startswith("🗞"):
     run_news_run_tab()
-
-with tab_eye:
+elif active.startswith("👁️"):
     run_advance_eye_tab()
