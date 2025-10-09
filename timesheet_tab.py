@@ -508,7 +508,12 @@ def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[
 
 
 def render_timesheet_tab():
-    """Вкладка Timesheet: теперь с автосохранением недели при любом изменении."""
+    """
+    Вкладка Timesheet.
+    — Без st.rerun()
+    — Автосохранение всей недели с дебаунсом (0.4s)
+    — Не трогаем query params без необходимости
+    """
     ensure_db_once()
 
     projects = fetch_projects()
@@ -521,53 +526,67 @@ def render_timesheet_tab():
     if not user_id:
         return
 
-    # контекст на пару (user, week)
+    # Контекст «пользователь + неделя»
     ctx = f"u{user_id}_{week.monday.isoformat()}"
 
-    # один раз при заходе/смене недели/пользователя — заполним UI из БД
+    # Гидратация UI из БД — только один раз на (user, week)
     _hydrate_week_state(ctx, user_id, week, projects)
 
-    # сетка дней
+    # Инструкция
     st.markdown(
         f"<div class='small'>Неделя: <b>{week.dates[0].strftime('%d.%m.%Y')}</b> — "
-        f"<b>{week.dates[-1].strftime('%d.%m.%Y')}</b>. Заполняйте проект и часы, новые строки добавляются автоматически.</div>",
+        f"<b>{week.dates[-1].strftime('%d.%m.%Y')}</b>. Заполняйте проект и часы — "
+        f"новые строки добавляются автоматически, изменения сохраняются сами.</div>",
         unsafe_allow_html=True,
     )
 
+    # Рендерим 7 дней
     proj_names = projects["name"].astype(str).tolist()
-    totals = []
-    for d in week.dates:
-        totals.append(_render_day(ctx, d, proj_names))
+    totals = [ _render_day(ctx, d, proj_names) for d in week.dates ]
 
-    # ---------- АВТОСОХРАНЕНИЕ (replace всей недели) ----------
+    # -------- АВТОСОХРАНЕНИЕ (replace всей недели) --------
     name2pid = {str(n): int(i) for i, n in projects[["id", "name"]].values}
-    tuples = _collect_rows_by_day(ctx, week, name2pid)
-    
-    import hashlib, json
-    def _digest(rows):
-        norm = sorted([(int(pid), d.isoformat(), float(hr)) for (pid, d, hr) in rows])
-        return hashlib.md5(json.dumps(norm, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-    
-    cur_hash = _digest(tuples)
-    hash_key  = f"ts_last_hash_{ctx}"
-    dirty_key = f"ts_dirty_{ctx}"
-    
-    need_save = st.session_state.get(dirty_key, False) or (st.session_state.get(hash_key) != cur_hash)
-    
-    if need_save:
+    tuples = _collect_rows_by_day(ctx, week, name2pid)  # [(pid, date, hours), ...]
+
+    # Хэш содержимого недели (чтобы не писать одинаковое по кругу)
+    import time, hashlib, json
+    norm = sorted([(int(pid), d.toordinal(), float(hr)) for (pid, d, hr) in tuples])
+    cur_hash = hashlib.md5(json.dumps(norm, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    hash_key  = f"ts_hash_{ctx}"          # последний сохранённый снимок
+    dirty_key = f"ts_dirty_{ctx}"         # флаг «что-то меняли»
+    tick_key  = f"ts_last_change_{ctx}"   # время последнего изменения (для дебаунса)
+
+    now = time.time()
+    # если колбэк что-то менял — он уже поставил dirty=True; запомним момент
+    if st.session_state.get(dirty_key):
+        st.session_state[tick_key] = now
+
+    last_change = st.session_state.get(tick_key, 0.0)
+
+    # сохраняем только если:
+    # 1) было изменение и прошло >0.4с тишины; или
+    # 2) хэш отличается от сохранённого (например, после «Обновить из БД»)
+    should_save = (
+        (st.session_state.get(dirty_key) and now - last_change > 0.4) or
+        (st.session_state.get(hash_key) != cur_hash)
+    )
+
+    if should_save:
         try:
             n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
             fetch_week_rows.clear()                       # сброс кеша читаемой недели
             st.session_state[hash_key]  = cur_hash
             st.session_state[dirty_key] = False
-            st.toast(f"Автосохранено ({n} строк)")
+            # никаких toast/alert — чтобы не трогать DOM и не мешать вкладкам
         except Exception as e:
-            st.warning(f"Не удалось автосохранить: {e}")
-    # ----------------------------------------------------------
+            # Покажем предупреждение, но без rerun
+            st.warning(f"Автосохранение не удалось: {e}")
+    # ------------------------------------------------------
+
+    st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
 
 
-    total_week = sum(totals)
-    st.markdown(f"**Итого за неделю:** {total_week:g} ч")
 
 
 
