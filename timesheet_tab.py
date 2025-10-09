@@ -249,26 +249,21 @@ def _fmt_hours(v):
         return str(v)
 
 def _get_saved_uid() -> Optional[int]:
-    uid = qp_get("uid")
-    if uid not in (None, "", "None"):
-        try:
-            return int(uid)
-        except Exception:
-            pass
-    if "uid" in st.session_state:
-        try:
-            return int(st.session_state["uid"])
-        except Exception:
-            pass
-    return None
+    """Читаем выбранного пользователя только из session_state (без query params)."""
+    uid = st.session_state.get("uid")
+    try:
+        return int(uid) if uid is not None else None
+    except Exception:
+        return None
+
 
 def _save_uid(uid: int) -> None:
     st.session_state["uid"] = int(uid)
-    qp_update(uid=uid)
+
 
 def _clear_saved_uid() -> None:
     st.session_state.pop("uid", None)
-    qp_delete("uid")
+
 
 def _hydrate_week_state(ctx: str, user_id: int, week: TimesheetWeek, projects: pd.DataFrame):
     """
@@ -400,19 +395,26 @@ def _on_remove_row(day_key: str, idx: int, ctx: str):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]:
-    st.markdown(_CSS, unsafe_allow_html=True)
     st.subheader("⏱️ Timesheet")
 
-    col1, col2 = st.columns([1.2, 1.8])
+    col1, col2, col3 = st.columns([1.1, 1.4, 1.2])
     with col1:
         picked = st.date_input("Неделя", value=date.today(), format="DD.MM.YYYY")
         week = TimesheetWeek.from_any(picked)
 
-    # по умолчанию ничего не выбрано
-    uid: Optional[int] = None
-
     saved_uid = _get_saved_uid()
     valid_ids = set(users["id"].astype(int).tolist())
+
+    # колбэки, чтобы не вызывать st.rerun()
+    def _cb_set_uid():
+        sel = st.session_state.get("ts_select_user_value")
+        if sel is not None:
+            _save_uid(int(sel))
+            st.session_state["ts_choose_user"] = False
+
+    def _cb_change_user():
+        _clear_saved_uid()
+        st.session_state["ts_choose_user"] = True
 
     with col2:
         choose_mode = st.session_state.get("ts_choose_user", saved_uid is None)
@@ -420,25 +422,13 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
         if (not choose_mode) and saved_uid and int(saved_uid) in valid_ids:
             row = users[users["id"] == int(saved_uid)].iloc[0]
             st.markdown(f"**Пользователь:** {row['first_name']} · id={int(row['id'])}")
-            c11, c12 = st.columns([1, 1])
-            with c11:
-                if st.button("Сменить пользователя"):
-                    _clear_saved_uid()
-                    st.session_state["ts_choose_user"] = True
-                    st.rerun()
-            with c12:
-                if st.button("🔄 Обновить из БД"):
-                    # сбрасываем «сигнатуры» гидратации, чтобы перечитать
-                    for k in list(st.session_state.keys()):
-                        if "_hydrated_sig" in k:
-                            del st.session_state[k]
-                    st.rerun()
-            uid = int(saved_uid)
-
+            st.button("Сменить пользователя", on_click=_cb_change_user)
+            user_id = int(saved_uid)
         else:
             ids = users["id"].astype(int).tolist()
-            labels = {int(r.id): f"{r.first_name}  ·  id={int(r.id)}" for r in users.itertuples(index=False)}
+            labels = {int(r.id): f"{r.first_name} · id={int(r.id)}" for r in users.itertuples(index=False)}
 
+            # default по tg_id — опционально
             default_idx = 0
             default_tg = st.secrets.get("DEFAULT_TG_ID")
             if default_tg:
@@ -446,22 +436,23 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
                     default_idx = users.index[users["tg_id"] == int(default_tg)][0]
                 except Exception:
                     default_idx = 0
-            if saved_uid and int(saved_uid) in ids:
-                default_idx = ids.index(int(saved_uid))
 
-            selected_id = st.selectbox(
+            st.selectbox(
                 "Выберите пользователя (один раз)",
                 options=ids,
                 index=default_idx if 0 <= default_idx < len(ids) else 0,
                 format_func=lambda i: labels.get(int(i), f"id={i}"),
-                key="ts_select_user",
+                key="ts_select_user_value",
             )
-            if st.button("✅ Выбрать этого пользователя"):
-                _save_uid(int(selected_id))
-                st.session_state["ts_choose_user"] = False
-                st.rerun()  # сразу перерисуемся в режим «пользователь выбран»
+            st.button("✅ Выбрать", on_click=_cb_set_uid)
+            user_id = _get_saved_uid()  # мог установиться колбэком в этом же проходе
 
-    return uid, week
+    with col3:
+        st.button("🔄 Обновить из БД", help="Перечитать данные недели из базы",
+                  on_click=lambda: [fetch_projects.clear(), fetch_users.clear(), fetch_week_rows.clear()])
+
+    return user_id, week
+
 
 
 def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[tuple[int, date, float]]:
@@ -585,6 +576,7 @@ def render_timesheet_tab():
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
+
 
 
 
