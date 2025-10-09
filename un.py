@@ -3313,25 +3313,36 @@ def run_news_run_tab() -> None:
 NAV_TABS = ["⏱️ Timesheet", "📊 AI-Insight", "🗞 News Run", "👁️ Advance Eye"]
 
 def _select_nav() -> str:
+    # 1) Берём последнее выбранное (если было), иначе — первый пункт
     default = st.session_state.get("active_tab", NAV_TABS[0])
+
+    # 2) Пытаемся отрисовать segmented_control (Streamlit 1.40+)
     try:
-        # Streamlit ≥ 1.40 — красивый переключатель
-        active = st.segmented_control("", NAV_TABS, default=default, key="active_tab")
+        active = st.segmented_control(
+            "Навигация",                # не пустой label, скрываем ниже
+            NAV_TABS,
+            default=default,
+            key="active_tab",
+            label_visibility="collapsed",
+        )
     except Exception:
-        # Фоллбек для старых версий
-        active = st.sidebar.radio("Раздел", NAV_TABS, index=NAV_TABS.index(default), key="active_tab")
-    st.session_state["active_tab"] = active
+        # 3) Фоллбек для более старых версий: радио в сайдбаре
+        active = st.sidebar.radio(
+            "Раздел",
+            NAV_TABS,
+            index=NAV_TABS.index(default),
+            key="active_tab",
+        )
+    # ВАЖНО: не писать st.session_state["active_tab"] = active!
     return active
 
 active = _select_nav()
 
-# ВАЖНО: никаких импортов из самого un.py — просто вызываем функции
+# Рендерим только выбранную секцию (остальные даже не исполняются)
 if active.startswith("⏱️"):
-    # лениво импортируем тяжёлую вкладку
-    from timesheet_tab import render_timesheet_tab
     render_timesheet_tab()
 elif active.startswith("📊"):
-    run_ai_insight_tab()
+    run_ai_insight_tab()      # функция уже объявлена в этом же файле
 elif active.startswith("🗞"):
     run_news_run_tab()
 elif active.startswith("👁️"):
