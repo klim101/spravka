@@ -565,6 +565,7 @@ def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
     return df
 
 @st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
     """Логи всех сотрудников за произвольный период [date_from, date_to]."""
     eng = get_engine()
@@ -587,9 +588,10 @@ def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
     return df
 
 
+
 def _render_admin_utilization(week: TimesheetWeek):
     if not is_admin():
-        return
+        return  # защита
 
     st.divider()
     st.subheader("📊 Нагрузка команды (админ)")
@@ -607,34 +609,36 @@ def _render_admin_utilization(week: TimesheetWeek):
     if d1 > d2:
         d1, d2 = d2, d1
 
-    # Данные + дописываем всех пользователей по ID
+    # Данные за период + добиваем всех пользователей по ID (с EPS)
     df = fetch_team_range(d1, d2)
     users_df = fetch_users()  # id, first_name, tg_id
     df = _pad_all_users_by_id(df, users_df)
 
-    # Агрегаты
+    # Агрегаты: человек(ID) × проект и totals
     df_agg = (df.groupby(["user_id", "user_label", "project"], as_index=False)["hours"].sum())
     totals = (df_agg.groupby(["user_id", "user_label"], as_index=False)["hours"].sum()
                     .rename(columns={"hours": "total_hours"}))
 
-    # Полный порядок X по total (чтобы сверху были самые загруженные)
-    order_users = (totals.sort_values("total_hours", ascending=False)["user_label"].tolist())
+    # Порядок X по total (все пользователи)
+    order_users = totals.sort_values("total_hours", ascending=False)["user_label"].tolist()
 
     try:
         import altair as alt
 
-        # Базовые столбцы (stacked). ВАЖНО: фиксируем domain оси X всеми пользователями.
+        x_enc = alt.X(
+            "user_label:N",
+            sort=None,
+            scale=alt.Scale(domain=order_users),  # фиксируем домен для всех людей
+            title="Сотрудник",
+            axis=alt.Axis(labelAngle=-40),
+        )
+
+        # Стековые столбцы
         base_bars = (
             alt.Chart(df_agg)
               .mark_bar()
               .encode(
-                  x=alt.X(
-                      "user_label:N",
-                      sort=None,
-                      scale=alt.Scale(domain=order_users),
-                      title="Сотрудник",
-                      axis=alt.Axis(labelAngle=-40)
-                  ),
+                  x=x_enc,
                   y=alt.Y("hours:Q", stack="zero", title="Часы"),
                   color=alt.Color("project:N", title="Проект"),
                   tooltip=[
@@ -646,25 +650,25 @@ def _render_admin_utilization(week: TimesheetWeek):
               .properties(width={"step": 18})
         )
 
-        # Подписи на сегментах
+        # Подписи сегментов (не мусорим очень мелкими)
         seg_labels = (
             alt.Chart(df_agg)
               .transform_filter(alt.datum.hours >= 0.1)
               .mark_text(baseline="middle", dy=0)
               .encode(
-                  x=alt.X("user_label:N", scale=alt.Scale(domain=order_users)),
+                  x=x_enc,
                   y=alt.Y("hours:Q", stack="zero"),
                   detail="project:N",
                   text=alt.Text("hours:Q", format=".1f"),
               )
         )
 
-        # Итог над колонкой (та же шкала Y, тот же domain X)
+        # Итог над колонкой (тот же x, та же шкала y)
         total_labels = (
             alt.Chart(totals)
               .mark_text(baseline='bottom', dy=-6)
               .encode(
-                  x=alt.X("user_label:N", scale=alt.Scale(domain=order_users)),
+                  x=x_enc,
                   y=alt.Y("total_hours:Q"),
                   text=alt.Text("total_hours:Q", format=".1f"),
               )
@@ -673,7 +677,7 @@ def _render_admin_utilization(week: TimesheetWeek):
         st.altair_chart(base_bars + seg_labels + total_labels, use_container_width=True)
 
     except Exception:
-        # Fallback: сводная таблица
+        # Fallback: таблица
         pivot = df_agg.pivot(index="user_label", columns="project", values="hours").fillna(0)
         pivot["Итого"] = pivot.sum(axis=1)
         pivot = pivot.reindex(order_users)
@@ -681,11 +685,11 @@ def _render_admin_utilization(week: TimesheetWeek):
 
 
 
+
 EPS = 1e-6  # микро-высота, чтобы категория гарантированно попала на ось
 
 def _pad_all_users_by_id(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFrame:
-    """Гарантирует наличие всех пользователей на графике.
-    Для тех, у кого нет записей в периоде, добавляем нулевую строку (EPS)."""
+    """Гарантирует наличие всех пользователей (по ID) в датасете; пустым даём EPS."""
     users = users_df[["id", "first_name"]].drop_duplicates().rename(columns={"id": "user_id"})
     users["user_label"] = users["first_name"].astype(str) + " · id=" + users["user_id"].astype(int).astype(str)
 
@@ -702,8 +706,8 @@ def _pad_all_users_by_id(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFra
     df = df.copy()
     df["user_label"] = df["first_name"].astype(str) + " · id=" + df["user_id"].astype(int).astype(str)
 
-    have_ids = set(df["user_id"].unique())
-    missing = users[~users["user_id"].isin(have_ids)]
+    have = set(df["user_id"].unique())
+    missing = users[~users["user_id"].isin(have)]
     if not missing.empty:
         df_zero = pd.DataFrame({
             "user_id": missing["user_id"],
@@ -714,8 +718,24 @@ def _pad_all_users_by_id(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFra
             "hours": [EPS] * len(missing),
         })
         df = pd.concat([df, df_zero], ignore_index=True)
-
     return df
+
+def _clear_cache_safe():
+    """Совместимая очистка кэша: пробуем точечно, иначе молча пропускаем."""
+    for fn in (fetch_projects, fetch_users, fetch_week_rows, fetch_team_week, fetch_team_range):
+        try:
+            clr = getattr(fn, "clear", None)
+            if callable(clr):
+                clr()
+        except Exception:
+            pass
+    # попытка глобальной очистки, если поддерживается
+    try:
+        clr_global = getattr(st.cache_data, "clear", None)
+        if callable(clr_global):
+            clr_global()
+    except Exception:
+        pass
 
 
 def render_timesheet_tab():
@@ -804,6 +824,7 @@ def render_timesheet_tab():
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
+
 
 
 
