@@ -493,7 +493,8 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
 
     with col3:
         st.button("🔄 Обновить из БД", help="Перечитать данные недели из базы",
-                  on_click=lambda: [fetch_projects.clear(), fetch_users.clear(), fetch_week_rows.clear()])
+                  on_click=lambda: st.cache_data.clear()
+
 
     return user_id, week
 
@@ -708,19 +709,29 @@ def render_timesheet_tab():
     )
 
     if should_save:
+        # 1) Сохраняем
         try:
-            n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
-            fetch_week_rows.clear()                       # сброс кеша читаемой недели
+            n = save_week_replace(user_id, week, tuples)
+        except Exception as e:
+            st.warning(f"Автосохранение не удалось: {e}")
+        else:
+            # 2) Безопасно чистим кэш
+            try:
+                clr = getattr(fetch_week_rows, "clear", None)
+                if callable(clr):
+                    clr()
+                else:
+                    st.cache_data.clear()
+            except Exception:
+                pass
+            # 3) Обновляем флаги
             st.session_state[hash_key]  = cur_hash
             st.session_state[dirty_key] = False
-            # никаких toast/alert — чтобы не трогать DOM и не мешать вкладкам
-        except Exception as e:
-            # Покажем предупреждение, но без rerun
-            st.warning(f"Автосохранение не удалось: {e}")
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
+
 
 
 
