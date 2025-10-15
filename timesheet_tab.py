@@ -621,7 +621,6 @@ def _admin_off():
 
 
 def _inject_admin_hotkey():
-    # Ловим Ctrl+Shift+A + Esc. Меняем query param и триггерим rerun.
     from streamlit.components.v1 import html as st_html
     st_html(
         """
@@ -634,12 +633,35 @@ def _inject_admin_hotkey():
             // попросим Streamlit сделать rerun
             window.parent.postMessage({isStreamlitMessage:true, type:'streamlit:rerun'}, '*');
           };
+
+          let shiftCount = 0, lastTs = 0;
+
           window.addEventListener('keydown', (e) => {
-            // Ctrl+Shift+A  → включить
-            if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyA') setAdmin(true);
-            // Esc → выключить
-            if (!e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Escape') setAdmin(false);
-          }, {passive:true});
+            // ✅ Новый хоткей: Ctrl+Alt+A (на macOS: Ctrl+Option+A)
+            if (e.ctrlKey && e.altKey && e.code === 'KeyA') {
+              e.preventDefault(); e.stopPropagation();
+              setAdmin(true);
+              return;
+            }
+            // ✅ Запасной триггер: 5 быстрых нажатий Shift (вкл/выкл)
+            if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+              const now = Date.now();
+              shiftCount = (now - lastTs < 600) ? (shiftCount + 1) : 1;
+              lastTs = now;
+              if (shiftCount >= 5) {
+                const q = new URL(window.location.href).searchParams;
+                const isOn = q.has('admin');
+                setAdmin(!isOn);
+                shiftCount = 0;
+                return;
+              }
+            }
+            // Выключение по Esc
+            if (!e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Escape') {
+              e.preventDefault(); e.stopPropagation();
+              setAdmin(false);
+            }
+          }, {capture:true});
         })();
         </script>
         """,
@@ -712,6 +734,7 @@ def render_admin_panel():
         st.download_button("⬇️ Экспорт итогов (CSV)", data=csv, file_name=f"workload_{d1}_{d2}.csv", mime="text/csv")
 
     st.button("Выйти из админ-режима", type="secondary", on_click=_admin_off)
+
 
 
 
