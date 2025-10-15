@@ -565,15 +565,13 @@ def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
     return df
 
 @st.cache_data(ttl=120, show_spinner=False)
-@st.cache_data(ttl=120, show_spinner=False)
 def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
     """Логи всех сотрудников за произвольный период [date_from, date_to]."""
     eng = get_engine()
     user_tbl = _detect_user_table(eng)
     q = text(f"""
-        SELECT u.id          AS user_id,
-               u.first_name  AS first_name,
-               p.name        AS project,
+        SELECT u.first_name AS user_name,
+               p.name       AS project,
                l.work_date,
                l.hours::float AS hours
         FROM log l
@@ -588,7 +586,6 @@ def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
     return df
 
 
-
 def _render_admin_utilization(week: TimesheetWeek):
     if not is_admin():
         return  # защита
@@ -596,7 +593,7 @@ def _render_admin_utilization(week: TimesheetWeek):
     st.divider()
     st.subheader("📊 Нагрузка команды (админ)")
 
-    # Период
+    # Выбор произвольного периода (по умолчанию текущая неделя)
     rng = st.date_input(
         "Период (для графиков)",
         value=(week.dates[0], week.dates[-1]),
@@ -609,134 +606,97 @@ def _render_admin_utilization(week: TimesheetWeek):
     if d1 > d2:
         d1, d2 = d2, d1
 
-    # Данные за период + добиваем всех пользователей по ID (с EPS)
+    # Данные за период + дополним отсутствующих пользователей нулями
     df = fetch_team_range(d1, d2)
-    users_df = fetch_users()  # id, first_name, tg_id
-    df = _pad_all_users_by_id(df, users_df)
+    users_df = fetch_users()[["first_name"]]  # все пользователи
+    df = _pad_all_users(df, users_df)
 
-    # Агрегаты: человек(ID) × проект и totals
-    df_agg = (df.groupby(["user_id", "user_label", "project"], as_index=False)["hours"].sum())
-    totals = (df_agg.groupby(["user_id", "user_label"], as_index=False)["hours"].sum()
-                    .rename(columns={"hours": "total_hours"}))
+    if df.empty:
+        st.info("Нет данных за выбранный период.")
+        return
 
-    # Порядок X по total (все пользователи)
-    order_users = totals.sort_values("total_hours", ascending=False)["user_label"].tolist()
+    # Агрегаты для графиков
+    df_agg = df.groupby(["user_name", "project"], as_index=False)["hours"].sum()
+    totals = (df_agg.groupby("user_name", as_index=False)["hours"].sum()
+                     .rename(columns={"hours": "total_hours"}))
 
+    # Порядок людей по убыванию total (учитывая нулевых)
+    order_users = (totals.sort_values("total_hours", ascending=False)["user_name"]
+                         .astype(str).tolist())
+
+    # Stacked columns + подписи
     try:
         import altair as alt
 
-        x_enc = alt.X(
-            "user_label:N",
-            sort=None,
-            scale=alt.Scale(domain=order_users),  # фиксируем домен для всех людей
-            title="Сотрудник",
-            axis=alt.Axis(labelAngle=-40),
-        )
-
-        # Стековые столбцы
         base_bars = (
             alt.Chart(df_agg)
               .mark_bar()
               .encode(
-                  x=x_enc,
+                  x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
                   y=alt.Y("hours:Q", stack="zero", title="Часы"),
                   color=alt.Color("project:N", title="Проект"),
-                  tooltip=[
-                      alt.Tooltip("user_label:N", title="Сотрудник"),
-                      alt.Tooltip("project:N", title="Проект"),
-                      alt.Tooltip("hours:Q", title="Часы", format=".1f"),
-                  ],
+                  tooltip=["user_name:N", "project:N", alt.Tooltip("hours:Q", format=".1f")],
               )
-              .properties(width={"step": 18})
         )
 
-        # Подписи сегментов (не мусорим очень мелкими)
+        # Подписи на каждом сегменте (скрываем совсем маленькие)
         seg_labels = (
             alt.Chart(df_agg)
-              .transform_filter(alt.datum.hours >= 0.1)
+              .transform_filter(alt.datum.hours > 0.01)
               .mark_text(baseline="middle", dy=0)
               .encode(
-                  x=x_enc,
+                  x=alt.X("user_name:N", sort=order_users),
                   y=alt.Y("hours:Q", stack="zero"),
                   detail="project:N",
                   text=alt.Text("hours:Q", format=".1f"),
               )
         )
 
-        # Итог над колонкой (тот же x, та же шкала y)
+        # Итог над колонкой
         total_labels = (
-            alt.Chart(totals)
-              .mark_text(baseline='bottom', dy=-6)
-              .encode(
-                  x=x_enc,
-                  y=alt.Y("total_hours:Q"),
-                  text=alt.Text("total_hours:Q", format=".1f"),
-              )
-        )
+                    alt.Chart(df_agg)
+                      .transform_aggregate(
+                          total='sum(hours)',
+                          groupby=['user_name']
+                      )
+                      .transform_filter(alt.datum.total > 0.01)
+                      .mark_text(baseline='bottom', dy=-4)
+                      .encode(
+                          x=alt.X("user_name:N", sort=order_users),
+                          y=alt.Y("total:Q"),
+                          text=alt.Text("total:Q", format=".1f"),
+                      )
+                )
+        
+                st.altair_chart(
+                    (base_bars + seg_labels + total_labels),
+                    use_container_width=True
+                )
 
-        st.altair_chart(base_bars + seg_labels + total_labels, use_container_width=True)
 
     except Exception:
-        # Fallback: таблица
-        pivot = df_agg.pivot(index="user_label", columns="project", values="hours").fillna(0)
+        # Fallback: сводная таблица
+        pivot = df_agg.pivot(index="user_name", columns="project", values="hours").fillna(0)
         pivot["Итого"] = pivot.sum(axis=1)
         pivot = pivot.reindex(order_users)
         st.dataframe(pivot, use_container_width=True)
 
 
-
-
-EPS = 1e-6  # микро-высота, чтобы категория гарантированно попала на ось
-
-def _pad_all_users_by_id(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFrame:
-    """Гарантирует наличие всех пользователей (по ID) в датасете; пустым даём EPS."""
-    users = users_df[["id", "first_name"]].drop_duplicates().rename(columns={"id": "user_id"})
-    users["user_label"] = users["first_name"].astype(str) + " · id=" + users["user_id"].astype(int).astype(str)
-
-    if df.empty:
-        return pd.DataFrame({
-            "user_id": users["user_id"],
-            "first_name": users["first_name"],
-            "user_label": users["user_label"],
-            "project": ["(нет данных)"] * len(users),
-            "work_date": [None] * len(users),
-            "hours": [EPS] * len(users),
-        })
-
-    df = df.copy()
-    df["user_label"] = df["first_name"].astype(str) + " · id=" + df["user_id"].astype(int).astype(str)
-
-    have = set(df["user_id"].unique())
-    missing = users[~users["user_id"].isin(have)]
-    if not missing.empty:
+def _pad_all_users(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFrame:
+    """Возвращает df, в котором есть все пользователи.
+    Тем, у кого в периоде нет записей, добавляется одна нулевая строка с project='—'."""
+    all_users = users_df["first_name"].astype(str).unique().tolist()
+    have = set(df["user_name"].astype(str).unique().tolist()) if not df.empty else set()
+    missing = [u for u in all_users if u not in have]
+    if missing:
         df_zero = pd.DataFrame({
-            "user_id": missing["user_id"],
-            "first_name": missing["first_name"],
-            "user_label": missing["user_label"],
-            "project": ["(нет данных)"] * len(missing),
+            "user_name": missing,
+            "project": ["—"] * len(missing),
             "work_date": [None] * len(missing),
-            "hours": [EPS] * len(missing),
+            "hours": [0.0] * len(missing),
         })
         df = pd.concat([df, df_zero], ignore_index=True)
     return df
-
-def _clear_cache_safe():
-    """Совместимая очистка кэша: пробуем точечно, иначе молча пропускаем."""
-    for fn in (fetch_projects, fetch_users, fetch_week_rows, fetch_team_week, fetch_team_range):
-        try:
-            clr = getattr(fn, "clear", None)
-            if callable(clr):
-                clr()
-        except Exception:
-            pass
-    # попытка глобальной очистки, если поддерживается
-    try:
-        clr_global = getattr(st.cache_data, "clear", None)
-        if callable(clr_global):
-            clr_global()
-    except Exception:
-        pass
-
 
 def render_timesheet_tab():
     """
@@ -824,9 +784,6 @@ def render_timesheet_tab():
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
-
-
-
 
 
 
