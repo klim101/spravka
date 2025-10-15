@@ -654,16 +654,25 @@ def _render_admin_utilization(week: TimesheetWeek):
 
         # Итог над колонкой
         total_labels = (
-            alt.Chart(totals)
-              .mark_text(dy=-6)
-              .encode(
-                  x=alt.X("user_name:N", sort=order_users),
-                  y=alt.Y("total_hours:Q"),
-                  text=alt.Text("total_hours:Q", format=".1f"),
-              )
-        )
+                    alt.Chart(df_agg)
+                      .transform_aggregate(
+                          total='sum(hours)',
+                          groupby=['user_name']
+                      )
+                      .transform_filter(alt.datum.total > 0.01)
+                      .mark_text(baseline='bottom', dy=-4)
+                      .encode(
+                          x=alt.X("user_name:N", sort=order_users),
+                          y=alt.Y("total:Q"),
+                          text=alt.Text("total:Q", format=".1f"),
+                      )
+                )
+        
+                st.altair_chart(
+                    (base_bars + seg_labels + total_labels),
+                    use_container_width=True
+                )
 
-        st.altair_chart((base_bars + seg_labels + total_labels), use_container_width=True)
 
     except Exception:
         # Fallback: сводная таблица
@@ -775,6 +784,7 @@ def render_timesheet_tab():
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
+
 
 
 
