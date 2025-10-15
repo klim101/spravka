@@ -32,6 +32,74 @@ def get_engine():
 # DDL / структура
 # ──────────────────────────────────────────────────────────────────────────────
 
+def render_admin_panel():
+    import altair as alt
+
+    st.markdown(
+        """
+        <div style="
+            border:1px solid #e3e3e7;border-radius:12px;padding:14px 16px;margin:8px 0 16px 0;
+            background:linear-gradient(180deg, #fff, #f9fafc);">
+          <div style="font-weight:700;">🔐 Админ-панель · загрузка сотрудников</div>
+          <div style="font-size:12px;color:#666;">Нажми Esc, чтобы выйти из режима.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Период
+    c1, c2, c3 = st.columns([1.1, 1.1, 1])
+    with c1:
+        d2 = st.date_input("До", value=date.today(), format="DD.MM.YYYY")
+    with c2:
+        d1_default = date.today() - timedelta(days=28)
+        d1 = st.date_input("С", value=d1_default, format="DD.MM.YYYY", max_value=d2)
+    with c3:
+        agg = st.selectbox("Детализация", ["По дням", "По неделям"])
+
+    df = fetch_hours_interval(d1, d2)
+
+    if df.empty:
+        st.info("За выбранный период нет данных.")
+    else:
+        plot_df = df.copy()
+        if agg == "По неделям":
+            ts = pd.to_datetime(plot_df["work_date"])
+            week_start = (ts - pd.to_timedelta(ts.dt.weekday, unit="D")).dt.date
+            plot_df = (
+                plot_df.assign(week_start=week_start)
+                       .groupby(["week_start", "first_name"], as_index=False)["hours"].sum()
+            )
+            x_field, x_title = "week_start:T", "Неделя (пн)"
+        else:
+            plot_df = plot_df.groupby(["work_date", "first_name"], as_index=False)["hours"].sum()
+            x_field, x_title = "work_date:T", "Дата"
+
+        chart = (
+            alt.Chart(plot_df)
+               .mark_bar()
+               .encode(
+                   x=alt.X(x_field, title=x_title),
+                   y=alt.Y("sum(hours):Q", title="Часы"),
+                   color=alt.Color("first_name:N", title="Сотрудник"),
+                   tooltip=[x_field, "first_name:N", alt.Tooltip("sum(hours):Q", title="Часы")]
+               )
+               .properties(height=320)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+        # сводка по людям
+        summary = plot_df.groupby("first_name", as_index=False)["hours"].sum().sort_values("hours", ascending=False)
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        # выгрузка CSV
+        csv = summary.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Экспорт итогов (CSV)", data=csv, file_name=f"workload_{d1}_{d2}.csv", mime="text/csv")
+
+    st.button("Выйти из админ-режима", type="secondary", on_click=_admin_off)
+
+
+
 def _detect_user_table(engine) -> str:
     insp = inspect(engine)
     names = {t.lower() for t in insp.get_table_names()}
@@ -669,71 +737,7 @@ def _inject_admin_hotkey():
     )
 
 
-def render_admin_panel():
-    import altair as alt
 
-    st.markdown(
-        """
-        <div style="
-            border:1px solid #e3e3e7;border-radius:12px;padding:14px 16px;margin:8px 0 16px 0;
-            background:linear-gradient(180deg, #fff, #f9fafc);">
-          <div style="font-weight:700;">🔐 Админ-панель · загрузка сотрудников</div>
-          <div style="font-size:12px;color:#666;">Нажми Esc, чтобы выйти из режима.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Период
-    c1, c2, c3 = st.columns([1.1, 1.1, 1])
-    with c1:
-        d2 = st.date_input("До", value=date.today(), format="DD.MM.YYYY")
-    with c2:
-        d1_default = date.today() - timedelta(days=28)
-        d1 = st.date_input("С", value=d1_default, format="DD.MM.YYYY", max_value=d2)
-    with c3:
-        agg = st.selectbox("Детализация", ["По дням", "По неделям"])
-
-    df = fetch_hours_interval(d1, d2)
-
-    if df.empty:
-        st.info("За выбранный период нет данных.")
-    else:
-        plot_df = df.copy()
-        if agg == "По неделям":
-            ts = pd.to_datetime(plot_df["work_date"])
-            week_start = (ts - pd.to_timedelta(ts.dt.weekday, unit="D")).dt.date
-            plot_df = (
-                plot_df.assign(week_start=week_start)
-                       .groupby(["week_start", "first_name"], as_index=False)["hours"].sum()
-            )
-            x_field, x_title = "week_start:T", "Неделя (пн)"
-        else:
-            plot_df = plot_df.groupby(["work_date", "first_name"], as_index=False)["hours"].sum()
-            x_field, x_title = "work_date:T", "Дата"
-
-        chart = (
-            alt.Chart(plot_df)
-               .mark_bar()
-               .encode(
-                   x=alt.X(x_field, title=x_title),
-                   y=alt.Y("sum(hours):Q", title="Часы"),
-                   color=alt.Color("first_name:N", title="Сотрудник"),
-                   tooltip=[x_field, "first_name:N", alt.Tooltip("sum(hours):Q", title="Часы")]
-               )
-               .properties(height=320)
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-        # сводка по людям
-        summary = plot_df.groupby("first_name", as_index=False)["hours"].sum().sort_values("hours", ascending=False)
-        st.dataframe(summary, use_container_width=True, hide_index=True)
-
-        # выгрузка CSV
-        csv = summary.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Экспорт итогов (CSV)", data=csv, file_name=f"workload_{d1}_{d2}.csv", mime="text/csv")
-
-    st.button("Выйти из админ-режима", type="secondary", on_click=_admin_off)
 
 
 
