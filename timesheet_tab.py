@@ -32,9 +32,6 @@ def get_engine():
 # DDL / структура
 # ──────────────────────────────────────────────────────────────────────────────
 
-from admin_secret import init_admin_mode, render_admin_panel
-
-
 def _detect_user_table(engine) -> str:
     insp = inspect(engine)
     names = {t.lower() for t in insp.get_table_names()}
@@ -508,12 +505,7 @@ def render_timesheet_tab():
     — Автосохранение всей недели с дебаунсом (0.4s)
     — Не трогаем query params без необходимости
     """
-    _inject_admin_hotkey()           # ← ловим Ctrl+Shift+A / Esc
-    if _is_admin():
-        render_admin_panel()         # ← показываем админ-панель наверху
-
     ensure_db_once()
-
 
     projects = fetch_projects()
     users = fetch_users()
@@ -584,101 +576,6 @@ def render_timesheet_tab():
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_hours_interval(d1: date, d2: date) -> pd.DataFrame:
-    """
-    Возвращает DataFrame: work_date(date), user_id(int), first_name(str), hours(float)
-    """
-    eng = get_engine()
-    user_tbl = _detect_user_table(eng)
-    q = text(f"""
-        SELECT l.work_date::date   AS work_date,
-               u.id::bigint        AS user_id,
-               u.first_name::text  AS first_name,
-               SUM(l.hours)::float AS hours
-        FROM log l
-        JOIN {user_tbl} u ON u.id = l.user_id
-        WHERE l.work_date BETWEEN :d1 AND :d2
-        GROUP BY l.work_date, u.id, u.first_name
-        ORDER BY l.work_date, u.first_name
-    """)
-    df = pd.read_sql(q, eng, params={"d1": d1, "d2": d2})
-    if not df.empty:
-        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
-        df["hours"] = df["hours"].astype(float)
-    return df
-
-
-def _is_admin() -> bool:
-    # признак из query params → session_state
-    v = str(qp_get("admin", "0")).lower()
-    if v in ("1", "true", "yes"):
-        st.session_state["__admin__"] = True
-    return bool(st.session_state.get("__admin__", False))
-
-
-def _admin_off():
-    st.session_state["__admin__"] = False
-    qp_delete("admin")
-
-
-def _inject_admin_hotkey():
-    from streamlit.components.v1 import html as st_html
-    st_html(
-        """
-        <script>
-        (function () {
-          const setAdmin = (on) => {
-            const url = new URL(window.location.href);
-            if (on) url.searchParams.set('admin','1'); else url.searchParams.delete('admin');
-            window.history.replaceState({}, '', url);
-            // попросим Streamlit сделать rerun
-            window.parent.postMessage({isStreamlitMessage:true, type:'streamlit:rerun'}, '*');
-          };
-
-          let shiftCount = 0, lastTs = 0;
-
-          window.addEventListener('keydown', (e) => {
-            // ✅ Новый хоткей: Ctrl+Alt+A (на macOS: Ctrl+Option+A)
-            if (e.ctrlKey && e.altKey && e.code === 'KeyA') {
-              e.preventDefault(); e.stopPropagation();
-              setAdmin(true);
-              return;
-            }
-            // ✅ Запасной триггер: 5 быстрых нажатий Shift (вкл/выкл)
-            if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-              const now = Date.now();
-              shiftCount = (now - lastTs < 600) ? (shiftCount + 1) : 1;
-              lastTs = now;
-              if (shiftCount >= 5) {
-                const q = new URL(window.location.href).searchParams;
-                const isOn = q.has('admin');
-                setAdmin(!isOn);
-                shiftCount = 0;
-                return;
-              }
-            }
-            // Выключение по Esc
-            if (!e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Escape') {
-              e.preventDefault(); e.stopPropagation();
-              setAdmin(false);
-            }
-          }, {capture:true});
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-
-
-
-
-
-
-
 
 
 
