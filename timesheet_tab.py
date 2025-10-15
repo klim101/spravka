@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-
+import hmac, time
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, inspect, text
@@ -31,9 +31,6 @@ def get_engine():
 # ──────────────────────────────────────────────────────────────────────────────
 # DDL / структура
 # ──────────────────────────────────────────────────────────────────────────────
-
-from admin_secret import init_admin_mode, render_admin_panel
-
 
 def _detect_user_table(engine) -> str:
     insp = inspect(engine)
@@ -220,6 +217,50 @@ def qp_delete(*names):
         for n in names:
             current.pop(n, None)
         st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv) for k, vv in current.items()})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Admin PIN (скрытый вход через сайдбар)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _admin_pin_value() -> str:
+    return (str(st.secrets.get("ADMIN_PIN", "")) or os.environ.get("ADMIN_PIN", "")).strip()
+
+def _admin_ttl_seconds() -> int:
+    try:
+        return int(st.secrets.get("ADMIN_PIN_TTL_HOURS", 8)) * 3600
+    except Exception:
+        return 8 * 3600
+
+def is_admin() -> bool:
+    """Флаг активного админ-режима в текущей сессии (с TTL)."""
+    return float(st.session_state.get("admin_ok_until", 0.0)) > time.time()
+
+def admin_login_ui():
+    """Неброский вход: маленький замочек в сайдбаре."""
+    pin_cfg = _admin_pin_value()
+    if not pin_cfg:
+        return  # если PIN не задан — ничего не показываем
+
+    if is_admin():
+        with st.sidebar.expander("🔒 Admin", expanded=False):
+            st.caption("Режим администратора активен")
+            if st.button("Выйти", use_container_width=True):
+                st.session_state.pop("admin_ok_until", None)
+                st.rerun()
+        return
+
+    with st.sidebar.expander("🔒", expanded=False):
+        pin = st.text_input("PIN", type="password", label_visibility="collapsed")
+        if st.button("ОК", use_container_width=True) and pin:
+            if hmac.compare_digest(pin.strip(), pin_cfg):
+                st.session_state["admin_ok_until"] = time.time() + _admin_ttl_seconds()
+                st.success("Admin mode ON")
+                st.rerun()
+            else:
+                st.error("Неверный PIN")
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UI: выпадающие списки по дням, автодобавление строк, гидратация из БД
@@ -451,8 +492,12 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
             user_id = _get_saved_uid()  # мог установиться колбэком в этом же проходе
 
     with col3:
-        st.button("🔄 Обновить из БД", help="Перечитать данные недели из базы",
-                  on_click=lambda: [fetch_projects.clear(), fetch_users.clear(), fetch_week_rows.clear()])
+        st.button(
+            "🔄 Обновить из БД",
+            help="Перечитать данные недели из базы",
+            on_click=lambda: st.cache_data.clear()
+        )
+
 
     return user_id, week
 
@@ -499,7 +544,150 @@ def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[
     return tuples
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
+    eng = get_engine()
+    user_tbl = _detect_user_table(eng)
+    q = text(f"""
+        SELECT u.first_name AS user_name,
+               p.name       AS project,
+               l.work_date,
+               l.hours::float AS hours
+        FROM log l
+        JOIN {user_tbl} u ON u.id = l.user_id
+        JOIN project p ON p.id = l.project_id
+        WHERE l.work_date BETWEEN :d1 AND :d7
+        ORDER BY u.first_name, l.work_date
+    """)
+    df = pd.read_sql(q, eng, params={"d1": week.dates[0], "d7": week.dates[-1]})
+    if not df.empty:
+        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
+    return df
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
+    """Логи всех сотрудников за произвольный период [date_from, date_to]."""
+    eng = get_engine()
+    user_tbl = _detect_user_table(eng)
+    q = text(f"""
+        SELECT u.first_name AS user_name,
+               p.name       AS project,
+               l.work_date,
+               l.hours::float AS hours
+        FROM log l
+        JOIN {user_tbl} u ON u.id = l.user_id
+        JOIN project p ON p.id = l.project_id
+        WHERE l.work_date BETWEEN :d1 AND :d2
+        ORDER BY u.first_name, l.work_date
+    """)
+    df = pd.read_sql(q, eng, params={"d1": date_from, "d2": date_to})
+    if not df.empty:
+        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
+    return df
+
+
+def _render_admin_utilization(week: TimesheetWeek):
+    if not is_admin():
+        return  # защита
+
+    st.divider()
+    st.subheader("📊 Нагрузка команды (админ)")
+
+    # Выбор произвольного периода (по умолчанию текущая неделя)
+    rng = st.date_input(
+        "Период (для графиков)",
+        value=(week.dates[0], week.dates[-1]),
+        format="DD.MM.YYYY",
+    )
+    if isinstance(rng, (list, tuple)) and len(rng) == 2:
+        d1, d2 = rng
+    else:
+        d1, d2 = week.dates[0], week.dates[-1]
+    if d1 > d2:
+        d1, d2 = d2, d1
+
+    # Данные за период + дополним отсутствующих пользователей нулями
+    df = fetch_team_range(d1, d2)
+    users_df = fetch_users()[["first_name"]]  # все пользователи
+    df = _pad_all_users(df, users_df)
+
+    if df.empty:
+        st.info("Нет данных за выбранный период.")
+        return
+
+    # Агрегаты для графиков
+    df_agg = df.groupby(["user_name", "project"], as_index=False)["hours"].sum()
+    totals = (df_agg.groupby("user_name", as_index=False)["hours"].sum()
+                     .rename(columns={"hours": "total_hours"}))
+
+    # Порядок людей по убыванию total (учитывая нулевых)
+    order_users = (totals.sort_values("total_hours", ascending=False)["user_name"]
+                         .astype(str).tolist())
+
+    # Stacked columns + подписи
+    try:
+        import altair as alt
+
+        base_bars = (
+            alt.Chart(df_agg)
+              .mark_bar()
+              .encode(
+                  x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
+                  y=alt.Y("hours:Q", stack="zero", title="Часы"),
+                  color=alt.Color("project:N", title="Проект"),
+                  tooltip=["user_name:N", "project:N", alt.Tooltip("hours:Q", format=".1f")],
+              )
+        )
+
+        # Подписи на каждом сегменте (скрываем совсем маленькие)
+        seg_labels = (
+            alt.Chart(df_agg)
+              .transform_filter(alt.datum.hours > 0.01)
+              .mark_text(baseline="middle", dy=0)
+              .encode(
+                  x=alt.X("user_name:N", sort=order_users),
+                  y=alt.Y("hours:Q", stack="zero"),
+                  detail="project:N",
+                  text=alt.Text("hours:Q", format=".1f"),
+              )
+        )
+
+        # Итог над колонкой
+        total_labels = (
+            alt.Chart(totals)
+              .mark_text(dy=-6)
+              .encode(
+                  x=alt.X("user_name:N", sort=order_users),
+                  y=alt.Y("total_hours:Q"),
+                  text=alt.Text("total_hours:Q", format=".1f"),
+              )
+        )
+
+        st.altair_chart((base_bars + seg_labels + total_labels), use_container_width=True)
+
+    except Exception:
+        # Fallback: сводная таблица
+        pivot = df_agg.pivot(index="user_name", columns="project", values="hours").fillna(0)
+        pivot["Итого"] = pivot.sum(axis=1)
+        pivot = pivot.reindex(order_users)
+        st.dataframe(pivot, use_container_width=True)
+
+
+def _pad_all_users(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFrame:
+    """Возвращает df, в котором есть все пользователи.
+    Тем, у кого в периоде нет записей, добавляется одна нулевая строка с project='—'."""
+    all_users = users_df["first_name"].astype(str).unique().tolist()
+    have = set(df["user_name"].astype(str).unique().tolist()) if not df.empty else set()
+    missing = [u for u in all_users if u not in have]
+    if missing:
+        df_zero = pd.DataFrame({
+            "user_name": missing,
+            "project": ["—"] * len(missing),
+            "work_date": [None] * len(missing),
+            "hours": [0.0] * len(missing),
+        })
+        df = pd.concat([df, df_zero], ignore_index=True)
+    return df
 
 def render_timesheet_tab():
     """
@@ -508,12 +696,8 @@ def render_timesheet_tab():
     — Автосохранение всей недели с дебаунсом (0.4s)
     — Не трогаем query params без необходимости
     """
-    _inject_admin_hotkey()           # ← ловим Ctrl+Shift+A / Esc
-    if _is_admin():
-        render_admin_panel()         # ← показываем админ-панель наверху
-
     ensure_db_once()
-
+    admin_login_ui()
 
     projects = fetch_projects()
     users = fetch_users()
@@ -572,108 +756,25 @@ def render_timesheet_tab():
     )
 
     if should_save:
+    # 1) сохраняем
+    try:
+        n = save_week_replace(user_id, week, tuples)
+    except Exception as e:
+        st.warning(f"Автосохранение не удалось: {e}")
+    else:
+        # 2) безопасно чистим кэш (без .clear() на функции)
         try:
-            n = save_week_replace(user_id, week, tuples)  # DELETE неделя -> INSERT актуальных строк
-            fetch_week_rows.clear()                       # сброс кеша читаемой недели
-            st.session_state[hash_key]  = cur_hash
-            st.session_state[dirty_key] = False
-            # никаких toast/alert — чтобы не трогать DOM и не мешать вкладкам
-        except Exception as e:
-            # Покажем предупреждение, но без rerun
-            st.warning(f"Автосохранение не удалось: {e}")
+            st.cache_data.clear()
+        except Exception:
+            pass
+        # 3) обновляем флаги
+        st.session_state[hash_key]  = cur_hash
+        st.session_state[dirty_key] = False
+
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
-
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_hours_interval(d1: date, d2: date) -> pd.DataFrame:
-    """
-    Возвращает DataFrame: work_date(date), user_id(int), first_name(str), hours(float)
-    """
-    eng = get_engine()
-    user_tbl = _detect_user_table(eng)
-    q = text(f"""
-        SELECT l.work_date::date   AS work_date,
-               u.id::bigint        AS user_id,
-               u.first_name::text  AS first_name,
-               SUM(l.hours)::float AS hours
-        FROM log l
-        JOIN {user_tbl} u ON u.id = l.user_id
-        WHERE l.work_date BETWEEN :d1 AND :d2
-        GROUP BY l.work_date, u.id, u.first_name
-        ORDER BY l.work_date, u.first_name
-    """)
-    df = pd.read_sql(q, eng, params={"d1": d1, "d2": d2})
-    if not df.empty:
-        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
-        df["hours"] = df["hours"].astype(float)
-    return df
-
-
-def _is_admin() -> bool:
-    # признак из query params → session_state
-    v = str(qp_get("admin", "0")).lower()
-    if v in ("1", "true", "yes"):
-        st.session_state["__admin__"] = True
-    return bool(st.session_state.get("__admin__", False))
-
-
-def _admin_off():
-    st.session_state["__admin__"] = False
-    qp_delete("admin")
-
-
-def _inject_admin_hotkey():
-    from streamlit.components.v1 import html as st_html
-    st_html(
-        """
-        <script>
-        (function () {
-          const setAdmin = (on) => {
-            const url = new URL(window.location.href);
-            if (on) url.searchParams.set('admin','1'); else url.searchParams.delete('admin');
-            window.history.replaceState({}, '', url);
-            // попросим Streamlit сделать rerun
-            window.parent.postMessage({isStreamlitMessage:true, type:'streamlit:rerun'}, '*');
-          };
-
-          let shiftCount = 0, lastTs = 0;
-
-          window.addEventListener('keydown', (e) => {
-            // ✅ Новый хоткей: Ctrl+Alt+A (на macOS: Ctrl+Option+A)
-            if (e.ctrlKey && e.altKey && e.code === 'KeyA') {
-              e.preventDefault(); e.stopPropagation();
-              setAdmin(true);
-              return;
-            }
-            // ✅ Запасной триггер: 5 быстрых нажатий Shift (вкл/выкл)
-            if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-              const now = Date.now();
-              shiftCount = (now - lastTs < 600) ? (shiftCount + 1) : 1;
-              lastTs = now;
-              if (shiftCount >= 5) {
-                const q = new URL(window.location.href).searchParams;
-                const isOn = q.has('admin');
-                setAdmin(!isOn);
-                shiftCount = 0;
-                return;
-              }
-            }
-            // Выключение по Esc
-            if (!e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Escape') {
-              e.preventDefault(); e.stopPropagation();
-              setAdmin(false);
-            }
-          }, {capture:true});
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-
-
+    _render_admin_utilization(week)
 
 
 
