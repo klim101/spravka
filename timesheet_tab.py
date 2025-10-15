@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-
+import hmac, time
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, inspect, text
@@ -217,6 +217,50 @@ def qp_delete(*names):
         for n in names:
             current.pop(n, None)
         st.experimental_set_query_params(**{k: (vv[0] if isinstance(vv, list) else vv) for k, vv in current.items()})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Admin PIN (скрытый вход через сайдбар)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _admin_pin_value() -> str:
+    return (str(st.secrets.get("ADMIN_PIN", "")) or os.environ.get("ADMIN_PIN", "")).strip()
+
+def _admin_ttl_seconds() -> int:
+    try:
+        return int(st.secrets.get("ADMIN_PIN_TTL_HOURS", 8)) * 3600
+    except Exception:
+        return 8 * 3600
+
+def is_admin() -> bool:
+    """Флаг активного админ-режима в текущей сессии (с TTL)."""
+    return float(st.session_state.get("admin_ok_until", 0.0)) > time.time()
+
+def admin_login_ui():
+    """Неброский вход: маленький замочек в сайдбаре."""
+    pin_cfg = _admin_pin_value()
+    if not pin_cfg:
+        return  # если PIN не задан — ничего не показываем
+
+    if is_admin():
+        with st.sidebar.expander("🔒 Admin", expanded=False):
+            st.caption("Режим администратора активен")
+            if st.button("Выйти", use_container_width=True):
+                st.session_state.pop("admin_ok_until", None)
+                st.rerun()
+        return
+
+    with st.sidebar.expander("🔒", expanded=False):
+        pin = st.text_input("PIN", type="password", label_visibility="collapsed")
+        if st.button("ОК", use_container_width=True) and pin:
+            if hmac.compare_digest(pin.strip(), pin_cfg):
+                st.session_state["admin_ok_until"] = time.time() + _admin_ttl_seconds()
+                st.success("Admin mode ON")
+                st.rerun()
+            else:
+                st.error("Неверный PIN")
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UI: выпадающие списки по дням, автодобавление строк, гидратация из БД
@@ -496,6 +540,80 @@ def _collect_rows_by_day(ctx: str, week: TimesheetWeek, name2pid: dict) -> list[
     return tuples
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
+    eng = get_engine()
+    user_tbl = _detect_user_table(eng)
+    q = text(f"""
+        SELECT u.first_name AS user_name,
+               p.name       AS project,
+               l.work_date,
+               l.hours::float AS hours
+        FROM log l
+        JOIN {user_tbl} u ON u.id = l.user_id
+        JOIN project p ON p.id = l.project_id
+        WHERE l.work_date BETWEEN :d1 AND :d7
+        ORDER BY u.first_name, l.work_date
+    """)
+    df = pd.read_sql(q, eng, params={"d1": week.dates[0], "d7": week.dates[-1]})
+    if not df.empty:
+        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
+    return df
+
+def _render_admin_utilization(week: TimesheetWeek):
+    if not is_admin():
+        return  # жёстко не исполняем серверные агрегации не-админам
+
+    st.divider()
+    st.subheader("📊 Нагрузка команды (админ)")
+
+    df = fetch_team_week(week)
+    if df.empty:
+        st.info("Нет данных за выбранную неделю.")
+        return
+
+    # Итого по людям
+    tot_by_user = (df.groupby("user_name", as_index=False)["hours"]
+                     .sum()
+                     .sort_values("hours", ascending=False))
+    st.write("**Итого по людям, ч:**")
+    st.dataframe(tot_by_user, use_container_width=True)
+
+    # Бар-чарт по людям
+    try:
+        import altair as alt
+        st.altair_chart(
+            alt.Chart(tot_by_user).mark_bar().encode(
+                x=alt.X("user_name:N", sort="-y", title="Сотрудник"),
+                y=alt.Y("hours:Q", title="Часы")
+            ),
+            use_container_width=True
+        )
+    except Exception:
+        st.bar_chart(tot_by_user.set_index("user_name"), use_container_width=True)
+
+    # Теплокарта «сотрудник × день»
+    mat = df.groupby(["user_name", "work_date"], as_index=False)["hours"].sum()
+    try:
+        import altair as alt
+        st.altair_chart(
+            alt.Chart(mat).mark_rect().encode(
+                x=alt.X("work_date:T", title="Дата"),
+                y=alt.Y("user_name:N", title="Сотрудник"),
+                color="hours:Q",
+                tooltip=["user_name","work_date","hours"]
+            ).interactive(),
+            use_container_width=True
+        )
+    except Exception:
+        pivot = mat.pivot(index="user_name", columns="work_date", values="hours").fillna(0)
+        st.dataframe(pivot, use_container_width=True)
+
+    with st.expander("Разбивка по проектам → по людям"):
+        by_proj_user = (df.groupby(["project","user_name"], as_index=False)["hours"]
+                          .sum()
+                          .sort_values(["project","hours"], ascending=[True, False]))
+        st.dataframe(by_proj_user, use_container_width=True)
 
 
 def render_timesheet_tab():
@@ -506,6 +624,7 @@ def render_timesheet_tab():
     — Не трогаем query params без необходимости
     """
     ensure_db_once()
+    admin_login_ui()
 
     projects = fetch_projects()
     users = fetch_users()
@@ -576,6 +695,9 @@ def render_timesheet_tab():
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
+    _render_admin_utilization(week)
+
+
 
 
 
