@@ -34,18 +34,6 @@ def get_engine():
 
 from admin_secret import init_admin_mode, render_admin_panel
 
-def render_timesheet_tab(df_times, ...):
-    # ✅ вызывать только внутри функции/во время рендера страницы
-    is_admin = init_admin_mode(auto_inject=True)
-    if is_admin:
-        render_admin_panel(
-            df_times=df_times,
-            # при необходимости укажите явные колонки:
-            # employee_col="name", date_col="work_date", hours_col="hours",
-        )
-        st.stop()
-
-
 
 def _detect_user_table(engine) -> str:
     insp = inspect(engine)
@@ -682,6 +670,7 @@ def _inject_admin_hotkey():
         """,
         height=0,
     )
+
 
 
 
