@@ -492,8 +492,11 @@ def _header_controls(users: pd.DataFrame) -> Tuple[Optional[int], TimesheetWeek]
             user_id = _get_saved_uid()  # мог установиться колбэком в этом же проходе
 
     with col3:
-        st.button("🔄 Обновить из БД", help="Перечитать данные недели из базы",
-                  on_click=lambda: st.cache_data.clear()
+        st.button(
+            "🔄 Обновить из БД",
+            help="Перечитать данные недели из базы",
+            on_click=lambda: st.cache_data.clear()
+        )
 
 
     return user_id, week
@@ -590,57 +593,110 @@ def _render_admin_utilization(week: TimesheetWeek):
     st.divider()
     st.subheader("📊 Нагрузка команды (админ)")
 
-    # Выбор периода (по умолчанию текущая неделя)
+    # Выбор произвольного периода (по умолчанию текущая неделя)
     rng = st.date_input(
         "Период (для графиков)",
         value=(week.dates[0], week.dates[-1]),
         format="DD.MM.YYYY",
     )
-    # date_input может вернуть одиночную дату — страхуемся
     if isinstance(rng, (list, tuple)) and len(rng) == 2:
         d1, d2 = rng
     else:
         d1, d2 = week.dates[0], week.dates[-1]
-    # на всякий случай порядок
     if d1 > d2:
         d1, d2 = d2, d1
 
+    # Данные за период + дополним отсутствующих пользователей нулями
     df = fetch_team_range(d1, d2)
+    users_df = fetch_users()[["first_name"]]  # все пользователи
+    df = _pad_all_users(df, users_df)
+
     if df.empty:
         st.info("Нет данных за выбранный период.")
         return
 
-    # Агрегация для stacked-колонок: человек × проект
-    df_agg = (df.groupby(["user_name", "project"], as_index=False)["hours"].sum())
+    # Агрегаты для графиков
+    df_agg = df.groupby(["user_name", "project"], as_index=False)["hours"].sum()
+    totals = (df_agg.groupby("user_name", as_index=False)["hours"].sum()
+                     .rename(columns={"hours": "total_hours"}))
 
-    # Сортировка людей по общей загрузке (по убыванию)
-    order_users = (df_agg.groupby("user_name")["hours"]
-                         .sum()
-                         .sort_values(ascending=False)
-                         .index.tolist())
+    # Порядок людей по убыванию total (учитывая нулевых)
+    order_users = (totals.sort_values("total_hours", ascending=False)["user_name"]
+                         .astype(str).tolist())
 
-    # График 1 — Stacked Columns: люди на оси X, цвет = проект
+    # Stacked columns + подписи
     try:
         import altair as alt
-        sel = alt.selection_point(fields=["project"], bind="legend")  # кликабельная легенда
-        chart = (
+
+        base_bars = (
             alt.Chart(df_agg)
               .mark_bar()
               .encode(
                   x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
                   y=alt.Y("hours:Q", stack="zero", title="Часы"),
                   color=alt.Color("project:N", title="Проект"),
-                  tooltip=["user_name:N", "project:N", "hours:Q"]
+                  tooltip=["user_name:N", "project:N", alt.Tooltip("hours:Q", format=".1f")],
               )
-              .add_params(sel)
         )
-        st.altair_chart(chart, use_container_width=True)
-    except Exception:
-        # Fallback без Altair — показываем сводную таблицу (её можно экспортировать)
-        pivot = df_agg.pivot(index="user_name", columns="project", values="hours").fillna(0)
-        st.dataframe(pivot, use_container_width=True)
-        st.caption("Для графика установите пакет Altair.")
 
+        # Подписи на каждом сегменте (скрываем совсем маленькие)
+        seg_labels = (
+            alt.Chart(df_agg)
+              .transform_filter(alt.datum.hours > 0.01)
+              .mark_text(baseline="middle", dy=0)
+              .encode(
+                  x=alt.X("user_name:N", sort=order_users),
+                  y=alt.Y("hours:Q", stack="zero"),
+                  detail="project:N",
+                  text=alt.Text("hours:Q", format=".1f"),
+              )
+        )
+
+        # Итог над колонкой
+        total_labels = (
+                    alt.Chart(df_agg)
+                      .transform_aggregate(
+                          total='sum(hours)',
+                          groupby=['user_name']
+                      )
+                      .transform_filter(alt.datum.total > 0.01)
+                      .mark_text(baseline='bottom', dy=-4)
+                      .encode(
+                          x=alt.X("user_name:N", sort=order_users),
+                          y=alt.Y("total:Q"),
+                          text=alt.Text("total:Q", format=".1f"),
+                      )
+                )
+        
+                st.altair_chart(
+                    (base_bars + seg_labels + total_labels),
+                    use_container_width=True
+                )
+
+
+    except Exception:
+        # Fallback: сводная таблица
+        pivot = df_agg.pivot(index="user_name", columns="project", values="hours").fillna(0)
+        pivot["Итого"] = pivot.sum(axis=1)
+        pivot = pivot.reindex(order_users)
+        st.dataframe(pivot, use_container_width=True)
+
+
+def _pad_all_users(df: pd.DataFrame, users_df: pd.DataFrame) -> pd.DataFrame:
+    """Возвращает df, в котором есть все пользователи.
+    Тем, у кого в периоде нет записей, добавляется одна нулевая строка с project='—'."""
+    all_users = users_df["first_name"].astype(str).unique().tolist()
+    have = set(df["user_name"].astype(str).unique().tolist()) if not df.empty else set()
+    missing = [u for u in all_users if u not in have]
+    if missing:
+        df_zero = pd.DataFrame({
+            "user_name": missing,
+            "project": ["—"] * len(missing),
+            "work_date": [None] * len(missing),
+            "hours": [0.0] * len(missing),
+        })
+        df = pd.concat([df, df_zero], ignore_index=True)
+    return df
 
 def render_timesheet_tab():
     """
@@ -709,28 +765,27 @@ def render_timesheet_tab():
     )
 
     if should_save:
-        # 1) Сохраняем
+    # 1) сохраняем
+    try:
+        n = save_week_replace(user_id, week, tuples)
+    except Exception as e:
+        st.warning(f"Автосохранение не удалось: {e}")
+    else:
+        # 2) безопасно чистим кэш (без .clear() на функции)
         try:
-            n = save_week_replace(user_id, week, tuples)
-        except Exception as e:
-            st.warning(f"Автосохранение не удалось: {e}")
-        else:
-            # 2) Безопасно чистим кэш
-            try:
-                clr = getattr(fetch_week_rows, "clear", None)
-                if callable(clr):
-                    clr()
-                else:
-                    st.cache_data.clear()
-            except Exception:
-                pass
-            # 3) Обновляем флаги
-            st.session_state[hash_key]  = cur_hash
-            st.session_state[dirty_key] = False
+            st.cache_data.clear()
+        except Exception:
+            pass
+        # 3) обновляем флаги
+        st.session_state[hash_key]  = cur_hash
+        st.session_state[dirty_key] = False
+
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
+
+
 
 
 
