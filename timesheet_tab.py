@@ -560,60 +560,85 @@ def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
         df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
     return df
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_team_range(date_from: date, date_to: date) -> pd.DataFrame:
+    """Логи всех сотрудников за произвольный период [date_from, date_to]."""
+    eng = get_engine()
+    user_tbl = _detect_user_table(eng)
+    q = text(f"""
+        SELECT u.first_name AS user_name,
+               p.name       AS project,
+               l.work_date,
+               l.hours::float AS hours
+        FROM log l
+        JOIN {user_tbl} u ON u.id = l.user_id
+        JOIN project p ON p.id = l.project_id
+        WHERE l.work_date BETWEEN :d1 AND :d2
+        ORDER BY u.first_name, l.work_date
+    """)
+    df = pd.read_sql(q, eng, params={"d1": date_from, "d2": date_to})
+    if not df.empty:
+        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
+    return df
+
+
 def _render_admin_utilization(week: TimesheetWeek):
     if not is_admin():
-        return  # жёстко не исполняем серверные агрегации не-админам
+        return  # защита
 
     st.divider()
     st.subheader("📊 Нагрузка команды (админ)")
 
-    df = fetch_team_week(week)
+    # Выбор периода (по умолчанию текущая неделя)
+    rng = st.date_input(
+        "Период (для графиков)",
+        value=(week.dates[0], week.dates[-1]),
+        format="DD.MM.YYYY",
+    )
+    # date_input может вернуть одиночную дату — страхуемся
+    if isinstance(rng, (list, tuple)) and len(rng) == 2:
+        d1, d2 = rng
+    else:
+        d1, d2 = week.dates[0], week.dates[-1]
+    # на всякий случай порядок
+    if d1 > d2:
+        d1, d2 = d2, d1
+
+    df = fetch_team_range(d1, d2)
     if df.empty:
-        st.info("Нет данных за выбранную неделю.")
+        st.info("Нет данных за выбранный период.")
         return
 
-    # Итого по людям
-    tot_by_user = (df.groupby("user_name", as_index=False)["hours"]
-                     .sum()
-                     .sort_values("hours", ascending=False))
-    st.write("**Итого по людям, ч:**")
-    st.dataframe(tot_by_user, use_container_width=True)
+    # Агрегация для stacked-колонок: человек × проект
+    df_agg = (df.groupby(["user_name", "project"], as_index=False)["hours"].sum())
 
-    # Бар-чарт по людям
+    # Сортировка людей по общей загрузке (по убыванию)
+    order_users = (df_agg.groupby("user_name")["hours"]
+                         .sum()
+                         .sort_values(ascending=False)
+                         .index.tolist())
+
+    # График 1 — Stacked Columns: люди на оси X, цвет = проект
     try:
         import altair as alt
-        st.altair_chart(
-            alt.Chart(tot_by_user).mark_bar().encode(
-                x=alt.X("user_name:N", sort="-y", title="Сотрудник"),
-                y=alt.Y("hours:Q", title="Часы")
-            ),
-            use_container_width=True
+        sel = alt.selection_point(fields=["project"], bind="legend")  # кликабельная легенда
+        chart = (
+            alt.Chart(df_agg)
+              .mark_bar()
+              .encode(
+                  x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
+                  y=alt.Y("hours:Q", stack="zero", title="Часы"),
+                  color=alt.Color("project:N", title="Проект"),
+                  tooltip=["user_name:N", "project:N", "hours:Q"]
+              )
+              .add_params(sel)
         )
+        st.altair_chart(chart, use_container_width=True)
     except Exception:
-        st.bar_chart(tot_by_user.set_index("user_name"), use_container_width=True)
-
-    # Теплокарта «сотрудник × день»
-    mat = df.groupby(["user_name", "work_date"], as_index=False)["hours"].sum()
-    try:
-        import altair as alt
-        st.altair_chart(
-            alt.Chart(mat).mark_rect().encode(
-                x=alt.X("work_date:T", title="Дата"),
-                y=alt.Y("user_name:N", title="Сотрудник"),
-                color="hours:Q",
-                tooltip=["user_name","work_date","hours"]
-            ).interactive(),
-            use_container_width=True
-        )
-    except Exception:
-        pivot = mat.pivot(index="user_name", columns="work_date", values="hours").fillna(0)
+        # Fallback без Altair — показываем сводную таблицу (её можно экспортировать)
+        pivot = df_agg.pivot(index="user_name", columns="project", values="hours").fillna(0)
         st.dataframe(pivot, use_container_width=True)
-
-    with st.expander("Разбивка по проектам → по людям"):
-        by_proj_user = (df.groupby(["project","user_name"], as_index=False)["hours"]
-                          .sum()
-                          .sort_values(["project","hours"], ascending=[True, False]))
-        st.dataframe(by_proj_user, use_container_width=True)
+        st.caption("Для графика установите пакет Altair.")
 
 
 def render_timesheet_tab():
@@ -696,6 +721,7 @@ def render_timesheet_tab():
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     _render_admin_utilization(week)
+
 
 
 
