@@ -32,21 +32,18 @@ def get_engine():
 # DDL / структура
 # ──────────────────────────────────────────────────────────────────────────────
 
-# вверху файла, рядом с другими импортами
 from admin_secret import init_admin_mode, render_admin_panel
 
-# …где-то сразу после заголовка/навигации, ДО рендера основной страницы:
-is_admin = init_admin_mode(auto_inject=True)  # слушатель Konami установится автоматически
-if is_admin:
-    # передайте сюда ваш датафрейм с табелем:
-    # ниже — пример с наиболее вероятными колонками; при расхождении укажите их явно.
-    render_admin_panel(
-        df_times=df_times,           # ← ваш DataFrame с табелем
-        # employee_col="name",       # можно указать явно, если авто-детект не угадал
-        # date_col="work_date",
-        # hours_col="hours",
-    )
-    st.stop()  # чтобы обычный UI не продолжал рендериться
+def render_timesheet_tab(df_times, ...):
+    # ✅ вызывать только внутри функции/во время рендера страницы
+    is_admin = init_admin_mode(auto_inject=True)
+    if is_admin:
+        render_admin_panel(
+            df_times=df_times,
+            # при необходимости укажите явные колонки:
+            # employee_col="name", date_col="work_date", hours_col="hours",
+        )
+        st.stop()
 
 
 
@@ -685,6 +682,7 @@ def _inject_admin_hotkey():
         """,
         height=0,
     )
+
 
 
 
