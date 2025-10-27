@@ -666,50 +666,96 @@ def _render_admin_utilization(week: TimesheetWeek):
     # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
     try:
         import altair as alt
+        import re
     
-        # 3.1. Готовим «перенесённые» подписи (пробел → \n)
-        chart_df = agg_up.copy()
-        chart_df["user_wrap"] = chart_df["user_name"].str.replace(r"\s+", "\n", regex=True)
+        MAX_VERTICAL = 10   # до 10 человек держим вертикально, иначе — горизонтально
+        STEP_PX     = 70    # ширина на одного человека в вертикальном графике
     
-        totals2 = totals.copy()
-        totals2["user_wrap"] = totals2["user_name"].str.replace(r"\s+", "\n", regex=True)
+        n_users = len(totals)
+        order_users = totals["user_name"].tolist()
     
-        # порядок категорий должен совпадать с тем, что на оси
-        order_wrap = [u.replace(" ", "\n") for u in order_users]
+        # перенос "Имя↵Фамилия" (если 3+ слов — Имя↵Фамилия, отчество уходит ко второй строке)
+        def _wrap_fio(s: str) -> str:
+            parts = re.split(r"\s+", str(s or "").strip())
+            if len(parts) >= 3:
+                return f"{parts[0]}\n{parts[-1]}"
+            elif len(parts) == 2:
+                return f"{parts[0]}\n{parts[1]}"
+            return s
     
-        axis_x = alt.Axis(
-            title="Сотрудник",
-            labelAngle=0,        # горизонтально
-            labelLimit=500,      # не обрезать слишком рано
-            labelOverlap=False,  # не скрывать подписи
-            labelFlush=False
-        )
+        if n_users <= MAX_VERTICAL:
+            # --- ВЕРТИКАЛЬНЫЙ вариант
+            chart_df = agg_up.copy()
+            chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
     
-        base = alt.Chart(chart_df).mark_bar().encode(
-            x=alt.X("user_wrap:N", sort=order_wrap, axis=axis_x),
-            y=alt.Y("hours:Q", stack="zero", title="Часы"),
-            color=alt.Color("project:N", title="Проект"),
-            tooltip=[
-                alt.Tooltip("user_name:N", title="Сотрудник"),
-                alt.Tooltip("project:N", title="Проект"),
-                alt.Tooltip("hours:Q", title="Часы", format=".1f"),
-            ],
-        )
+            totals2 = totals.copy()
+            totals2["user_wrap"] = totals2["user_name"].map(_wrap_fio)
     
-        # подписи тоталов над каждой стопкой
-        labels = alt.Chart(totals2).mark_text(dy=-6).encode(
-            x=alt.X("user_wrap:N", sort=order_wrap),
-            y=alt.Y("hours:Q"),
-            text=alt.Text("hours:Q", format=".1f"),
-            tooltip=[alt.Tooltip("hours:Q", title="Итого, ч", format=".1f")],
-        )
+            order_wrap = [ _wrap_fio(u) for u in order_users ]
     
-        st.altair_chart((base + labels).properties(height=420), use_container_width=True)
+            axis_x = alt.Axis(
+                title="Сотрудник",
+                labelAngle=0,          # без наклона — за счёт переноса "\n"
+                labelLimit=2000,       # не обрезать подписи
+                labelOverlap=False,    # не убирать подписи
+                labelPadding=6,
+            )
+    
+            base = alt.Chart(chart_df).mark_bar().encode(
+                x=alt.X("user_wrap:N", sort=order_wrap, axis=axis_x),
+                y=alt.Y("hours:Q", stack="zero", title="Часы"),
+                color=alt.Color("project:N", title="Проект"),
+                tooltip=[
+                    alt.Tooltip("user_name:N", title="Сотрудник"),
+                    alt.Tooltip("project:N", title="Проект"),
+                    alt.Tooltip("hours:Q", title="Часы", format=".1f"),
+                ],
+            )
+    
+            labels = alt.Chart(totals2).mark_text(
+                dy=-6, fontWeight="bold"
+            ).encode(
+                x=alt.X("user_wrap:N", sort=order_wrap),
+                y=alt.Y("hours:Q"),
+                text=alt.Text("hours:Q", format=".1f"),
+            )
+    
+            # авто-ширина: шаг * количество людей
+            st.altair_chart(
+                (base + labels).properties(height=420, width=alt.Step(STEP_PX)),
+                use_container_width=False  # важно: чтобы не перетёрлось шириной контейнера
+            )
+    
+        else:
+            # --- ГОРИЗОНТАЛЬНЫЙ вариант — когда людей много
+            base = alt.Chart(agg_up).mark_bar().encode(
+                y=alt.Y("user_name:N", sort=order_users, title="Сотрудник"),
+                x=alt.X("hours:Q", stack="zero", title="Часы"),
+                color=alt.Color("project:N", title="Проект"),
+                tooltip=[
+                    alt.Tooltip("user_name:N", title="Сотрудник"),
+                    alt.Tooltip("project:N", title="Проект"),
+                    alt.Tooltip("hours:Q", title="Часы", format=".1f"),
+                ],
+            )
+    
+            labels = alt.Chart(totals).mark_text(
+                align="left", dx=3, fontWeight="bold"
+            ).encode(
+                y=alt.Y("user_name:N", sort=order_users),
+                x=alt.X("hours:Q"),
+                text=alt.Text("hours:Q", format=".1f"),
+            )
+    
+            # высота по числу людей
+            h = max(320, 24 * n_users)
+            st.altair_chart((base + labels).properties(height=h), use_container_width=True)
     
     except Exception:
-        # Fallback: обычная столбчатая по развёрнутой сводной (без красивых переносов)
+        # Fallback: обычная столбчатая по сводной
         pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
         st.bar_chart(pivot, use_container_width=True)
+
 
 
 
@@ -820,6 +866,7 @@ def render_timesheet_tab():
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
         _render_admin_utilization(week)
+
 
 
 
