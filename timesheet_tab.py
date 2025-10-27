@@ -663,28 +663,56 @@ def _render_admin_utilization(week: TimesheetWeek):
     )
     order_users = totals["user_name"].tolist()
 
-    # --- График: stacked bar + сумма над колонкой
+    # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
     try:
         import altair as alt
 
+        # x-ось с переносом длинных имён по пробелам (каждое слово с новой строки)
+        axis_x = alt.Axis(
+            title="Сотрудник",
+            labelAngle=0,                  # горизонтально
+            labelLimit=220,                # даём место под многострочные подписи
+            labelExpr="replace(datum.label, /\\s+/g, '\\n')"   # перенос по пробелам
+        )
+
         base = alt.Chart(agg_up).mark_bar().encode(
-            x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
+            x=alt.X("user_name:N", sort=order_users, axis=axis_x),
             y=alt.Y("hours:Q", stack="zero", title="Часы"),
             color=alt.Color("project:N", title="Проект"),
-            tooltip=["user_name", "project", alt.Tooltip("hours:Q", title="Часы")],
+            tooltip=[
+                alt.Tooltip("user_name:N", title="Сотрудник"),
+                alt.Tooltip("project:N", title="Проект"),
+                alt.Tooltip("hours:Q", title="Часы", format=".1f"),
+            ],
         )
 
-        labels = alt.Chart(totals).mark_text(dy=-6).encode(
-            x=alt.X("user_name:N", sort=order_users),
+        # Текстовые подписи-total над каждой стопкой (всегда видны)
+        totals_lbl = totals.copy()
+        totals_lbl["hours_label"] = totals_lbl["hours"].map(lambda x: f"{x:.1f}")
+
+        labels = alt.Chart(totals_lbl).mark_text(
+            dy=-6,                          # чуть выше вершины столбца
+            fontWeight="bold"
+        ).encode(
+            x=alt.X("user_name:N", sort=order_users, axis=None),
             y=alt.Y("hours:Q"),
-            text=alt.Text("hours:Q", format=".1f"),
+            text=alt.Text("hours_label:N"),
+            tooltip=[
+                alt.Tooltip("user_name:N", title="Сотрудник"),
+                alt.Tooltip("hours:Q", title="Итого часов", format=".1f"),
+            ],
         )
 
-        st.altair_chart((base + labels).properties(height=420), use_container_width=True)
+        st.altair_chart(
+            (base + labels).properties(height=440),
+            use_container_width=True
+        )
+
     except Exception:
-        # Fallback: если Altair недоступен
+        # Fallback: обычная столбчатая по развёрнутой сводной (без тоталов над колонками)
         pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
         st.bar_chart(pivot, use_container_width=True)
+
 
     # --- Экспорт в Excel (backup данных графика)
     import io
@@ -793,6 +821,7 @@ def render_timesheet_tab():
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
         _render_admin_utilization(week)
+
 
 
 
