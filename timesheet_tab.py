@@ -10,6 +10,32 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, inspect, text
 
+
+from datetime import date, datetime
+
+def _to_date_like(x) -> date:
+    """Надёжно приводит к datetime.date (поддерживает datetime, pandas.Timestamp, str)."""
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    if isinstance(x, datetime):
+        return x.date()
+    try:
+        import pandas as pd  # noqa
+        if isinstance(x, pd.Timestamp):
+            return x.date()
+    except Exception:
+        pass
+    if isinstance(x, str):
+        try:
+            return datetime.fromisoformat(x).date()
+        except Exception:
+            pass
+    return date.today()
+
+
+
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Подключение к Supabase (PostgreSQL)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -587,59 +613,57 @@ def fetch_team_interval(d1: date, d2: date) -> pd.DataFrame:
     return df
 
 def _render_admin_utilization(week: TimesheetWeek):
-    """
-    Панель администратора:
-      1) выбор произвольного периода;
-      2) stacked bar: X=сотрудник, Y=часы, цвет=проект + сумма над колонкой;
-      3) выгрузка Excel с backup данных для графика.
-    """
+    """Админ-панель: выбор произвольного периода, stacked-bar по проектам, экспорт в Excel."""
     if not is_admin():
-        return  # не исполняем админский блок для не-админов
+        return
 
     st.divider()
     st.subheader("🛡️ Администратор: загрузка команды за период")
 
-    # 1) Выбор периода (по умолчанию — текущая неделя)
-    colP1, colP2 = st.columns([1.8, 1])
-    with colP1:
-        d1_def = st.session_state.get("__adm_d1") or week.dates[0]
-        d2_def = st.session_state.get("__adm_d2") or week.dates[-1]
-        period = st.date_input(
-            "Период",
-            value=(d1_def, d2_def),
-            format="DD.MM.YYYY"
-        )
-        try:
-            d1, d2 = period
-        except Exception:
-            d1 = period
-            d2 = period
-        if d1 > d2:
-            d1, d2 = d2, d1
-        st.session_state["__adm_d1"], st.session_state["__adm_d2"] = d1, d2
+    # --- Диапазон дат: по умолчанию неделя из week, но строго 2 даты, не список!
+    d1_def = _to_date_like(st.session_state.get("__adm_d1") or week.dates[0])
+    d2_def = _to_date_like(st.session_state.get("__adm_d2") or week.dates[-1])
 
-    with colP2:
-        st.caption(" ")
-        st.caption(f"Выбрано: {d1:%d.%m.%Y} — {d2:%d.%m.%Y}")
+    period = st.date_input(
+        "Период",
+        value=(d1_def, d2_def),       # ВАЖНО: именно (date1, date2), а не week/список
+        format="DD.MM.YYYY",
+    )
 
-    # 2) Данные за период
+    # Нормализуем ввод: поддержим и одиночную дату (на всякий)
+    if isinstance(period, (list, tuple)) and len(period) == 2:
+        d1, d2 = map(_to_date_like, period)
+    else:
+        d1 = d2 = _to_date_like(period)
+
+    if d1 > d2:
+        d1, d2 = d2, d1
+
+    st.session_state["__adm_d1"], st.session_state["__adm_d2"] = d1, d2
+    st.caption(f"Выбрано: {d1:%d.%m.%Y} — {d2:%d.%m.%Y}")
+
+    # --- Данные за период
     df = fetch_team_interval(d1, d2)
     if df.empty:
         st.info("Нет данных за выбранный период.")
         return
 
-    # агрегат «сотрудник × проект» (почва для stacked bar)
-    agg_up = (df.groupby(["user_name", "project"], as_index=False)["hours"]
-                .sum()
-                .sort_values(["user_name", "hours"], ascending=[True, False]))
+    # агрегат «сотрудник × проект» за период
+    agg_up = (
+        df.groupby(["user_name", "project"], as_index=False)["hours"]
+          .sum()
+          .sort_values(["user_name", "hours"], ascending=[True, False])
+    )
 
-    # итого по сотрудникам — для подписи над колонками и порядка по оси X
-    totals = (agg_up.groupby("user_name", as_index=False)["hours"]
-                    .sum()
-                    .sort_values("hours", ascending=False))
+    # порядок сотрудников по общей загрузке
+    totals = (
+        agg_up.groupby("user_name", as_index=False)["hours"]
+              .sum()
+              .sort_values("hours", ascending=False)
+    )
     order_users = totals["user_name"].tolist()
 
-    # 3) График: stacked bar + подписи суммы часов над колонками
+    # --- График: stacked bar + сумма над колонкой
     try:
         import altair as alt
 
@@ -647,33 +671,31 @@ def _render_admin_utilization(week: TimesheetWeek):
             x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
             y=alt.Y("hours:Q", stack="zero", title="Часы"),
             color=alt.Color("project:N", title="Проект"),
-            tooltip=["user_name", "project", alt.Tooltip("hours:Q", title="Часы")]
+            tooltip=["user_name", "project", alt.Tooltip("hours:Q", title="Часы")],
         )
 
         labels = alt.Chart(totals).mark_text(dy=-6).encode(
             x=alt.X("user_name:N", sort=order_users),
             y=alt.Y("hours:Q"),
-            text=alt.Text("hours:Q", format=".1f")
+            text=alt.Text("hours:Q", format=".1f"),
         )
 
         st.altair_chart((base + labels).properties(height=420), use_container_width=True)
     except Exception:
-        # Fallback: обычная столбчатая по сводной таблице
+        # Fallback: если Altair недоступен
         pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
         st.bar_chart(pivot, use_container_width=True)
 
-    # 4) Выгрузка backup в Excel (raw + агрегаты + pivot)
+    # --- Экспорт в Excel (backup данных графика)
     import io
-    buf = io.BytesIO()
     pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
-
+    buf = io.BytesIO()
     try:
         with pd.ExcelWriter(buf, engine="xlsxwriter") as xls:
             df.to_excel(xls, index=False, sheet_name="raw")
             agg_up.to_excel(xls, index=False, sheet_name="by_user_project")
             pivot.to_excel(xls, sheet_name="pivot_user_x_proj")
     except Exception:
-        # если нет xlsxwriter — используем дефолтный движок
         buf = io.BytesIO()
         with pd.ExcelWriter(buf) as xls:
             df.to_excel(xls, index=False, sheet_name="raw")
@@ -685,16 +707,8 @@ def _render_admin_utilization(week: TimesheetWeek):
         data=buf.getvalue(),
         file_name=f"timesheet_backup_{d1:%Y%m%d}_{d2:%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        use_container_width=True,
     )
-
-    with st.expander("Таблицы (просмотр)"):
-        st.write("**Итого по сотрудникам:**")
-        st.dataframe(totals, use_container_width=True)
-        st.write("**Сотрудник × Проект:**")
-        st.dataframe(agg_up, use_container_width=True)
-        st.write("**Pivot (для Excel):**")
-        st.dataframe(pivot, use_container_width=True)
 
 
 
@@ -777,7 +791,9 @@ def render_timesheet_tab():
     # ------------------------------------------------------
 
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
-    _render_admin_utilization(week)
+    if is_admin():
+        _render_admin_utilization(week)
+
 
 
 
