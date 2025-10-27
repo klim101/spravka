@@ -8,7 +8,7 @@
 # coding: utf-8
 
 # In[6]:
-#from timesheet_tab import render_timesheet, ensure_db
+#from timesheet_tab import render_timesheet_tab, ensure_db
 #ensure_db()  # создаст таблицы в выбранной БД при первом запуске
 
 # Устанавливаем API-ключ OpenAI
@@ -33,7 +33,7 @@ import threading
 import time
 import functools
 import ast
-from timesheet_tab import render_timesheet
+from timesheet_tab import render_timesheet_tab
 #ensure_db()  # безопасно дергать при старте (создаст недостающее)
 
 KEYS = {
@@ -3340,7 +3340,7 @@ active = _select_nav()
 
 # Рендерим только выбранную секцию (остальные даже не исполняются)
 if active.startswith("⏱️"):
-    render_timesheet()
+    render_timesheet_tab()
 elif active.startswith("📊"):
     run_ai_insight_tab()      # функция уже объявлена в этом же файле
 elif active.startswith("🗞"):
