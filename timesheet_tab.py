@@ -670,20 +670,18 @@ def _render_admin_utilization(week: TimesheetWeek):
         # x-ось с переносом длинных имён по пробелам (каждое слово с новой строки)
         axis_x = alt.Axis(
             title="Сотрудник",
-            labelAngle=0,                  # горизонтально
-            labelLimit=220,                # даём место под многострочные подписи
-            labelExpr="replace(datum.label, /\\s+/g, '\\n')"   # перенос по пробелам
+            labelAngle=0,                  # горизонтальные подписи
+            labelLimit=240,                # побольше места
+            labelOverlap=False,            # не скрывать метки при конфликте
+            # Перенос по пробелам: заменяем пробелы на \n
+            labelExpr="replace(datum.label, regexp('\\\\s+','g'), '\\n')"
         )
 
         base = alt.Chart(agg_up).mark_bar().encode(
             x=alt.X("user_name:N", sort=order_users, axis=axis_x),
             y=alt.Y("hours:Q", stack="zero", title="Часы"),
             color=alt.Color("project:N", title="Проект"),
-            tooltip=[
-                alt.Tooltip("user_name:N", title="Сотрудник"),
-                alt.Tooltip("project:N", title="Проект"),
-                alt.Tooltip("hours:Q", title="Часы", format=".1f"),
-            ],
+            tooltip=["user_name", "project", alt.Tooltip("hours:Q", title="Часы", format=".1f")]
         )
 
         # Текстовые подписи-total над каждой стопкой (всегда видны)
@@ -821,6 +819,7 @@ def render_timesheet_tab():
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
         _render_admin_utilization(week)
+
 
 
 
