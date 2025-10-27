@@ -23,6 +23,7 @@ import openai
 from typing import List, Dict, Any, Tuple
 import json
 import streamlit as st
+st.set_page_config(layout="wide", initial_sidebar_state="expanded")
 from collections import defaultdict
 import asyncio, aiohttp, re, textwrap, nest_asyncio, openai, tiktoken
 from collections import defaultdict
