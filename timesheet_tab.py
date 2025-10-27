@@ -560,137 +560,60 @@ def fetch_team_week(week: TimesheetWeek) -> pd.DataFrame:
         df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
     return df
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_team_interval(d1: date, d2: date) -> pd.DataFrame:
-    """
-    Возвращает сырые строки по команде за период [d1; d2] с агрегированием по дню:
-      user_name, project, work_date, hours
-    """
-    eng = get_engine()
-    user_tbl = _detect_user_table(eng)
-    q = text(f"""
-        SELECT u.first_name AS user_name,
-               p.name       AS project,
-               l.work_date::date AS work_date,
-               SUM(l.hours)::float AS hours
-        FROM log l
-        JOIN {user_tbl} u ON u.id = l.user_id
-        JOIN project p    ON p.id = l.project_id
-        WHERE l.work_date BETWEEN :d1 AND :d2
-        GROUP BY u.first_name, p.name, l.work_date
-        ORDER BY u.first_name, l.work_date
-    """)
-    df = pd.read_sql(q, eng, params={"d1": d1, "d2": d2})
-    if not df.empty:
-        df["work_date"] = pd.to_datetime(df["work_date"]).dt.date
-        df["hours"] = df["hours"].astype(float)
-    return df
-
-
-def render_admin_panel():
+def _render_admin_utilization(week: TimesheetWeek):
     if not is_admin():
-        return  # только для админа
+        return  # жёстко не исполняем серверные агрегации не-админам
 
     st.divider()
-    st.subheader("🛡️ Администратор: загрузка команды за период")
+    st.subheader("📊 Нагрузка команды (админ)")
 
-    # ── 1) Период: любой
-    colP1, colP2 = st.columns([1.8, 1])
-    with colP1:
-        d1_def = st.session_state.get("__adm_d1") or (date.today() - timedelta(days=30))
-        d2_def = st.session_state.get("__adm_d2") or date.today()
-        period = st.date_input(
-            "Период",
-            value=(d1_def, d2_def),
-            format="DD.MM.YYYY"
-        )
-        try:
-            d1, d2 = period
-        except Exception:
-            d1 = period
-            d2 = period
-        if d1 > d2:
-            d1, d2 = d2, d1
-        st.session_state["__adm_d1"], st.session_state["__adm_d2"] = d1, d2
-
-    with colP2:
-        st.caption(" ")
-        st.caption(f"Выбрано: {d1:%d.%m.%Y} — {d2:%d.%m.%Y}")
-
-    # ── 2) Данные
-    df = fetch_team_interval(d1, d2)
+    df = fetch_team_week(week)
     if df.empty:
-        st.info("Нет данных за выбранный период.")
+        st.info("Нет данных за выбранную неделю.")
         return
 
-    # агрегат «сотрудник × проект»
-    agg_up = (df.groupby(["user_name", "project"], as_index=False)["hours"]
-                .sum()
-                .sort_values(["user_name", "hours"], ascending=[True, False]))
+    # Итого по людям
+    tot_by_user = (df.groupby("user_name", as_index=False)["hours"]
+                     .sum()
+                     .sort_values("hours", ascending=False))
+    st.write("**Итого по людям, ч:**")
+    st.dataframe(tot_by_user, use_container_width=True)
 
-    # порядок сотрудников по общему времени
-    totals = (agg_up.groupby("user_name", as_index=False)["hours"]
-                    .sum()
-                    .sort_values("hours", ascending=False))
-    order_users = totals["user_name"].tolist()
-
-    # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
+    # Бар-чарт по людям
     try:
         import altair as alt
-
-        base = alt.Chart(agg_up).mark_bar().encode(
-            x=alt.X("user_name:N", sort=order_users, title="Сотрудник"),
-            y=alt.Y("hours:Q", stack="zero", title="Часы"),
-            color=alt.Color("project:N", title="Проект"),
-            tooltip=["user_name", "project", alt.Tooltip("hours:Q", title="Часы")]
+        st.altair_chart(
+            alt.Chart(tot_by_user).mark_bar().encode(
+                x=alt.X("user_name:N", sort="-y", title="Сотрудник"),
+                y=alt.Y("hours:Q", title="Часы")
+            ),
+            use_container_width=True
         )
-
-        labels = alt.Chart(totals).mark_text(dy=-6).encode(
-            x=alt.X("user_name:N", sort=order_users),
-            y=alt.Y("hours:Q"),
-            text=alt.Text("hours:Q", format=".1f")
-        )
-
-        st.altair_chart((base + labels).properties(height=420), use_container_width=True)
     except Exception:
-        # Fallback: обычная столбчатая по развёрнутой сводной
-        pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
-        st.bar_chart(pivot, use_container_width=True)
+        st.bar_chart(tot_by_user.set_index("user_name"), use_container_width=True)
 
-    # ── 4) Выгрузка данных (Excel)
-    import io
-    buf = io.BytesIO()
-    pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
-
+    # Теплокарта «сотрудник × день»
+    mat = df.groupby(["user_name", "work_date"], as_index=False)["hours"].sum()
     try:
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as xls:
-            df.to_excel(xls, index=False, sheet_name="raw")
-            agg_up.to_excel(xls, index=False, sheet_name="by_user_project")
-            pivot.to_excel(xls, sheet_name="pivot_user_x_proj")
+        import altair as alt
+        st.altair_chart(
+            alt.Chart(mat).mark_rect().encode(
+                x=alt.X("work_date:T", title="Дата"),
+                y=alt.Y("user_name:N", title="Сотрудник"),
+                color="hours:Q",
+                tooltip=["user_name","work_date","hours"]
+            ).interactive(),
+            use_container_width=True
+        )
     except Exception:
-        # если нет xlsxwriter — используем дефолтный движок
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf) as xls:
-            df.to_excel(xls, index=False, sheet_name="raw")
-            agg_up.to_excel(xls, index=False, sheet_name="by_user_project")
-            pivot.to_excel(xls, sheet_name="pivot_user_x_proj")
-
-    st.download_button(
-        "📥 Скачать Excel (backup данных графика)",
-        data=buf.getvalue(),
-        file_name=f"timesheet_backup_{d1:%Y%m%d}_{d2:%Y%m%d}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-
-    with st.expander("Таблицы (просмотр)"):
-        st.write("**Итого по сотрудникам:**")
-        st.dataframe(totals, use_container_width=True)
-        st.write("**Сотрудник × Проект:**")
-        st.dataframe(agg_up, use_container_width=True)
-        st.write("**Pivot (для Excel):**")
+        pivot = mat.pivot(index="user_name", columns="work_date", values="hours").fillna(0)
         st.dataframe(pivot, use_container_width=True)
 
+    with st.expander("Разбивка по проектам → по людям"):
+        by_proj_user = (df.groupby(["project","user_name"], as_index=False)["hours"]
+                          .sum()
+                          .sort_values(["project","hours"], ascending=[True, False]))
+        st.dataframe(by_proj_user, use_container_width=True)
 
 
 def render_timesheet_tab():
@@ -771,15 +694,8 @@ def render_timesheet_tab():
             st.warning(f"Автосохранение не удалось: {e}")
     # ------------------------------------------------------
 
-    def render_timesheet_tab(*args, **kwargs):
-        return render_timesheet(*args, **kwargs)
-    
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
-    if is_admin():
-        render_admin_panel()
-
-
-
+    _render_admin_utilization(week)
 
 
 
