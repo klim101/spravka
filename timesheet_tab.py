@@ -692,125 +692,112 @@ def _render_admin_utilization(week: TimesheetWeek):
     order_users = totals["user_name"].tolist()
 
     # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
-    # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + тоталы; легенда справа без обрезки
-        try:
-            import altair as alt
-            import re, math
-    
-            MAX_VERTICAL = 10
-            n_users      = len(totals)
-            order_users  = totals["user_name"].tolist()
-    
-            # перенос "Имя↵Фамилия"
-            def _wrap_fio(s: str) -> str:
-                parts = re.split(r"\s+", str(s or "").strip())
-                if len(parts) >= 3:
-                    return f"{parts[0]}\n{parts[-1]}"
-                elif len(parts) == 2:
-                    return f"{parts[0]}\n{parts[1]}"
-                return s
-    
-            # ── легенда справа: считаем нужную ширину под самые длинные названия проектов
-            n_projects    = int(agg_up["project"].nunique())
-            max_lab_len   = int(agg_up["project"].astype(str).map(len).max() or 10)
-            PX_PER_CHAR   = 8        # средняя ширина символа (пикс)
-            LEGEND_MIN    = 200      # мин. ширина под легенду
-            LEGEND_MAX    = 520      # на всякий
-            right_pad     = int(min(LEGEND_MAX, max(LEGEND_MIN, 40 + PX_PER_CHAR * max_lab_len)))
-    
-            legend_cfg = alt.Legend(
-                title="Проект",
-                orient="right",
-                labelLimit=10_000,     # не обрезать подписи
-                titleLimit=10_000,
-                labelOverlap=False,
-                symbolLimit=10_000,
+    # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
+    try:
+        import altair as alt
+        import re, math
+
+        MAX_VERTICAL = 10     # до 10 людей рисуем вертикально, иначе — горизонтально
+        n_users      = len(totals)
+        order_users  = totals["user_name"].tolist()
+        n_projects   = int(agg_up["project"].nunique())
+
+        # легенда снизу, авто-колонки (чтобы всё влезло)
+        legend_cols = max(2, min(8, math.ceil(n_projects / 3)))
+        legend_cfg  = alt.Legend(
+            title="Проект",
+            orient="bottom",
+            columns=legend_cols,
+            labelLimit=4000,   # не обрезать подписи
+            titleLimit=4000,
+        )
+
+        # перенос "Имя↵Фамилия" (если 3+ слов — Имя↵Фамилия)
+        def _wrap_fio(s: str) -> str:
+            parts = re.split(r"\s+", str(s or "").strip())
+            if len(parts) >= 3:
+                return f"{parts[0]}\n{parts[-1]}"
+            elif len(parts) == 2:
+                return f"{parts[0]}\n{parts[1]}"
+            return s
+
+        if n_users <= MAX_VERTICAL:
+            # --- ВЕРТИКАЛЬНЫЙ вариант
+            chart_df = agg_up.copy()
+            chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
+
+            totals2 = totals.copy()
+            totals2["user_wrap"] = totals2["user_name"].map(_wrap_fio)
+
+            order_wrap = [_wrap_fio(u) for u in order_users]
+
+            base = alt.Chart(chart_df).mark_bar().encode(
+                x=alt.X(
+                    "user_wrap:N",
+                    sort=order_wrap,
+                    axis=alt.Axis(
+                        title="Сотрудник",
+                        labelAngle=0,
+                        labelLimit=4000,
+                        labelOverlap=False,
+                        labelPadding=6,
+                    ),
+                ),
+                y=alt.Y("hours:Q", stack="zero", title="Часы"),
+                color=alt.Color("project:N", legend=legend_cfg),
+                tooltip=[
+                    alt.Tooltip("user_name:N", title="Сотрудник"),
+                    alt.Tooltip("project:N",   title="Проект"),
+                    alt.Tooltip("hours:Q",     title="Часы", format=".1f"),
+                ],
             )
-    
-            # общий autosize так, чтобы учитывалась padding-область (в неё «влезет» легенда)
-            autosize = alt.AutoSizeParams(type="fit", contains="padding")
-    
-            if n_users <= MAX_VERTICAL:
-                # --- ВЕРТИКАЛЬНЫЙ вариант
-                chart_df = agg_up.copy()
-                chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
-    
-                totals2 = totals.copy()
-                totals2["user_wrap"] = totals2["user_name"].map(_wrap_fio)
-    
-                order_wrap = [_wrap_fio(u) for u in order_users]
-    
-                base = alt.Chart(chart_df).mark_bar().encode(
-                    x=alt.X(
-                        "user_wrap:N",
-                        sort=order_wrap,
-                        axis=alt.Axis(
-                            title="Сотрудник",
-                            labelAngle=0,
-                            labelLimit=10_000,
-                            labelOverlap=False,
-                            labelPadding=6,
-                        ),
-                    ),
-                    y=alt.Y("hours:Q", stack="zero", title="Часы"),
-                    color=alt.Color("project:N", legend=legend_cfg),
-                    tooltip=[
-                        alt.Tooltip("user_name:N", title="Сотрудник"),
-                        alt.Tooltip("project:N",   title="Проект"),
-                        alt.Tooltip("hours:Q",     title="Часы", format=".1f"),
-                    ],
-                )
-    
-                labels = alt.Chart(totals2).mark_text(dy=-6, fontWeight="bold").encode(
-                    x=alt.X("user_wrap:N", sort=order_wrap),
-                    y=alt.Y("hours:Q"),
-                    text=alt.Text("hours:Q", format=".1f"),
-                )
-    
-                chart = (base + labels).properties(height=440, autosize=autosize)\
-                                       .configure(padding={"right": right_pad, "left": 5, "top": 5, "bottom": 5})
-                st.altair_chart(chart, use_container_width=True)
-    
-            else:
-                # --- ГОРИЗОНТАЛЬНЫЙ вариант
-                chart_df = agg_up.copy()
-                chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
-    
-                totals2 = totals.copy()
-                totals2["user_wrap"] = totals2["user_name"].map(_wrap_fio)
-    
-                order_wrap = [_wrap_fio(u) for u in order_users]
-    
-                base = alt.Chart(chart_df).mark_bar().encode(
-                    y=alt.Y(
-                        "user_wrap:N",
-                        sort=order_wrap,
-                        axis=alt.Axis(title="Сотрудник", labelLimit=10_000, labelOverlap=False),
-                    ),
-                    x=alt.X("hours:Q", stack="zero", title="Часы"),
-                    color=alt.Color("project:N", legend=legend_cfg),
-                    tooltip=[
-                        alt.Tooltip("user_name:N", title="Сотрудник"),
-                        alt.Tooltip("project:N",   title="Проект"),
-                        alt.Tooltip("hours:Q",     title="Часы", format=".1f"),
-                    ],
-                )
-    
-                labels = alt.Chart(totals2).mark_text(align="left", dx=3, fontWeight="bold").encode(
-                    y=alt.Y("user_wrap:N", sort=order_wrap),
-                    x=alt.X("hours:Q"),
-                    text=alt.Text("hours:Q", format=".1f"),
-                )
-    
-                h = max(380, 26 * n_users)
-                chart = (base + labels).properties(height=h, autosize=autosize)\
-                                       .configure(padding={"right": right_pad, "left": 5, "top": 5, "bottom": 5})
-                st.altair_chart(chart, use_container_width=True)
-    
-        except Exception:
-            # Fallback: обычная столбчатая по сводной
-            pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
-            st.bar_chart(pivot, use_container_width=True)
+
+            labels = alt.Chart(totals2).mark_text(dy=-6, fontWeight="bold").encode(
+                x=alt.X("user_wrap:N", sort=order_wrap),
+                y=alt.Y("hours:Q"),
+                text=alt.Text("hours:Q", format=".1f"),
+            )
+
+            st.altair_chart((base + labels).properties(height=440), use_container_width=True)
+
+        else:
+            # --- ГОРИЗОНТАЛЬНЫЙ вариант (когда людей много)
+            chart_df = agg_up.copy()
+            chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
+
+            totals2 = totals.copy()
+            totals2["user_wrap"] = totals2["user_name"].map(_wrap_fio)
+
+            order_wrap = [_wrap_fio(u) for u in order_users]
+
+            base = alt.Chart(chart_df).mark_bar().encode(
+                y=alt.Y(
+                    "user_wrap:N",
+                    sort=order_wrap,
+                    axis=alt.Axis(title="Сотрудник", labelLimit=4000, labelOverlap=False),
+                ),
+                x=alt.X("hours:Q", stack="zero", title="Часы"),
+                color=alt.Color("project:N", legend=legend_cfg),
+                tooltip=[
+                    alt.Tooltip("user_name:N", title="Сотрудник"),
+                    alt.Tooltip("project:N",   title="Проект"),
+                    alt.Tooltip("hours:Q",     title="Часы", format=".1f"),
+                ],
+            )
+
+            labels = alt.Chart(totals2).mark_text(align="left", dx=3, fontWeight="bold").encode(
+                y=alt.Y("user_wrap:N", sort=order_wrap),
+                x=alt.X("hours:Q"),
+                text=alt.Text("hours:Q", format=".1f"),
+            )
+
+            h = max(380, 26 * n_users)  # авто-высота по числу людей
+            st.altair_chart((base + labels).properties(height=h), use_container_width=True)
+
+    except Exception:
+        # Fallback: обычная столбчатая по сводной
+        pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
+        st.bar_chart(pivot, use_container_width=True)
 
 
 
@@ -923,8 +910,6 @@ def render_timesheet_tab():
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
         _render_admin_utilization(week)
-
-
 
 
 
