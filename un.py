@@ -33,7 +33,11 @@ import threading
 import time
 import functools
 import ast
-from timesheet_tab import render_timesheet_tab
+try:
+    from timesheet_tab import render_timesheet
+except ImportError:
+    # если модуль экспортирует только новое имя
+    from timesheet_tab import render_timesheet_tab as render_timesheet
 #ensure_db()  # безопасно дергать при старте (создаст недостающее)
 
 KEYS = {
