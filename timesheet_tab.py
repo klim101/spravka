@@ -771,9 +771,13 @@ def render_timesheet_tab():
             st.warning(f"Автосохранение не удалось: {e}")
     # ------------------------------------------------------
 
+    def render_timesheet_tab(*args, **kwargs):
+        return render_timesheet(*args, **kwargs)
+    
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
-    render_admin_panel()
+        render_admin_panel()
+
 
 
 
