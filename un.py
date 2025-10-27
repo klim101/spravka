@@ -39,7 +39,7 @@ except ImportError:
     # если модуль экспортирует только новое имя
     from timesheet_tab import render_timesheet_tab as render_timesheet
 #ensure_db()  # безопасно дергать при старте (создаст недостающее)
-
+render_timesheet_tab = render_timesheet
 KEYS = {
     "OPENAI_API_KEY": st.secrets["OPENAI_API_KEY"],
     "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
@@ -3344,6 +3344,7 @@ active = _select_nav()
 
 # Рендерим только выбранную секцию (остальные даже не исполняются)
 if active.startswith("⏱️"):
+    
     render_timesheet_tab()
 elif active.startswith("📊"):
     run_ai_insight_tab()      # функция уже объявлена в этом же файле
