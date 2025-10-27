@@ -692,13 +692,16 @@ def _render_admin_utilization(week: TimesheetWeek):
     order_users = totals["user_name"].tolist()
 
     # ── 3) График: stacked bar (X=сотрудник, Y=часы, цвет=проект) + сумма над колонкой
+    # Легенду выносим в отдельную колонку справа, чтобы не обрезалась.
     try:
         import altair as alt
-        import re, math
+        import re
 
         MAX_VERTICAL = 10
-        n_users      = len(totals)
-        order_users  = totals["user_name"].tolist()
+        STEP_PX     = 70
+
+        n_users     = len(totals)
+        order_users = totals["user_name"].tolist()
 
         # перенос "Имя↵Фамилия"
         def _wrap_fio(s: str) -> str:
@@ -709,28 +712,15 @@ def _render_admin_utilization(week: TimesheetWeek):
                 return f"{parts[0]}\n{parts[1]}"
             return s
 
-        # ── легенда справа: считаем нужную ширину под самые длинные названия проектов
-        n_projects    = int(agg_up["project"].nunique())
-        max_lab_len   = int(agg_up["project"].astype(str).map(len).max() or 10)
-        PX_PER_CHAR   = 8        # средняя ширина символа (пикс)
-        LEGEND_MIN    = 200      # мин. ширина под легенду
-        LEGEND_MAX    = 520      # на всякий
-        right_pad     = int(min(LEGEND_MAX, max(LEGEND_MIN, 40 + PX_PER_CHAR * max_lab_len)))
+        # ── общий цветовой scale, общий порядок проектов
+        proj_order  = sorted(agg_up["project"].astype(str).unique().tolist())
+        color_scale = alt.Scale(domain=proj_order, scheme="category20")  # до 20 проектов; при >20 Altair продолжит цикл
 
-        legend_cfg = alt.Legend(
-            title="Проект",
-            orient="right",
-            labelLimit=10_000,     # не обрезать подписи
-            titleLimit=10_000,
-            labelOverlap=False,
-            symbolLimit=10_000,
-        )
-
-        # общий autosize так, чтобы учитывалась padding-область (в неё «влезет» легенда)
-        autosize = alt.AutoSizeParams(type="fit", contains="padding")
+        # две колонки: график | легенда
+        col_chart, col_leg = st.columns([6, 3], gap="large")
 
         if n_users <= MAX_VERTICAL:
-            # --- ВЕРТИКАЛЬНЫЙ вариант
+            # --- вертикальный вариант
             chart_df = agg_up.copy()
             chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
 
@@ -743,16 +733,10 @@ def _render_admin_utilization(week: TimesheetWeek):
                 x=alt.X(
                     "user_wrap:N",
                     sort=order_wrap,
-                    axis=alt.Axis(
-                        title="Сотрудник",
-                        labelAngle=0,
-                        labelLimit=10_000,
-                        labelOverlap=False,
-                        labelPadding=6,
-                    ),
+                    axis=alt.Axis(title="Сотрудник", labelAngle=0, labelLimit=10_000, labelOverlap=False),
                 ),
                 y=alt.Y("hours:Q", stack="zero", title="Часы"),
-                color=alt.Color("project:N", legend=legend_cfg),
+                color=alt.Color("project:N", scale=color_scale, legend=None),   # <— легенда отключена
                 tooltip=[
                     alt.Tooltip("user_name:N", title="Сотрудник"),
                     alt.Tooltip("project:N",   title="Проект"),
@@ -766,12 +750,13 @@ def _render_admin_utilization(week: TimesheetWeek):
                 text=alt.Text("hours:Q", format=".1f"),
             )
 
-            chart = (base + labels).properties(height=440, autosize=autosize)\
-                                   .configure(padding={"right": right_pad, "left": 5, "top": 5, "bottom": 5})
-            st.altair_chart(chart, use_container_width=True)
+            chart = (base + labels).properties(
+                height=440,
+                width=alt.Step(STEP_PX)  # шаг по X, авто-ширина по числу людей
+            ).configure(padding={"right": 12, "left": 5, "top": 5, "bottom": 5})
 
         else:
-            # --- ГОРИЗОНТАЛЬНЫЙ вариант
+            # --- горизонтальный вариант
             chart_df = agg_up.copy()
             chart_df["user_wrap"] = chart_df["user_name"].map(_wrap_fio)
 
@@ -787,7 +772,7 @@ def _render_admin_utilization(week: TimesheetWeek):
                     axis=alt.Axis(title="Сотрудник", labelLimit=10_000, labelOverlap=False),
                 ),
                 x=alt.X("hours:Q", stack="zero", title="Часы"),
-                color=alt.Color("project:N", legend=legend_cfg),
+                color=alt.Color("project:N", scale=color_scale, legend=None),   # <— легенда отключена
                 tooltip=[
                     alt.Tooltip("user_name:N", title="Сотрудник"),
                     alt.Tooltip("project:N",   title="Проект"),
@@ -802,14 +787,31 @@ def _render_admin_utilization(week: TimesheetWeek):
             )
 
             h = max(380, 26 * n_users)
-            chart = (base + labels).properties(height=h, autosize=autosize)\
-                                   .configure(padding={"right": right_pad, "left": 5, "top": 5, "bottom": 5})
+            chart = (base + labels).properties(height=h)
+
+        # --- рисуем
+        with col_chart:
             st.altair_chart(chart, use_container_width=True)
+
+        # --- отдельная «легенда»-колонка с тем же scale (ничего не обрезается)
+        with col_leg:
+            proj_df = pd.DataFrame({"project": proj_order})
+            swatches = alt.Chart(proj_df).mark_rect(width=14, height=14, stroke="lightgray").encode(
+                y=alt.Y("project:N", sort=proj_order, axis=alt.Axis(title="Проекты", labelLimit=10_000)),
+                color=alt.Color("project:N", scale=color_scale, legend=None),
+            )
+            labels_leg = alt.Chart(proj_df).mark_text(align="left", dx=8, baseline="middle").encode(
+                y=alt.Y("project:N", sort=proj_order, axis=None),
+                text="project:N",
+            )
+            legend = (swatches + labels_leg).properties(height=max(200, 18 * len(proj_order)))
+            st.altair_chart(legend, use_container_width=True)
 
     except Exception:
         # Fallback: обычная столбчатая по сводной
         pivot = agg_up.pivot(index="user_name", columns="project", values="hours").fillna(0)
         st.bar_chart(pivot, use_container_width=True)
+
 
 
 
@@ -922,6 +924,7 @@ def render_timesheet_tab():
     st.markdown(f"**Итого за неделю:** {sum(totals):g} ч")
     if is_admin():
         _render_admin_utilization(week)
+
 
 
 
